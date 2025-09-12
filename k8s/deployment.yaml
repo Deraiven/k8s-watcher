@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: namespace-watcher
+  namespace: default
+  labels:
+    app: namespace-watcher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: namespace-watcher
+  template:
+    metadata:
+      labels:
+        app: namespace-watcher
+    spec:
+      serviceAccountName: namespace-watcher
+      containers:
+      - name: namespace-watcher
+        image: namespace-watcher:latest
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        envFrom:
+        - configMapRef:
+            name: namespace-watcher-config
+        - secretRef:
+            name: namespace-watcher-secrets
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import sys; sys.exit(0)"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import sys; sys.exit(0)"
+          initialDelaySeconds: 10
+          periodSeconds: 10

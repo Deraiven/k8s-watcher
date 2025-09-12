@@ -1,0 +1,25 @@
+# Kubernetes client
+kubernetes>=28.1.0
+
+# AWS SDK
+aioboto3>=12.0.0
+boto3>=1.28.0
+
+# HTTP client
+aiohttp>=3.9.0
+
+# SSH client
+asyncssh>=2.14.0
+
+# MySQL connector
+aiomysql>=0.2.0
+pymysql>=1.1.0
+
+# Retry logic
+backoff>=2.2.0
+
+# Environment management
+python-dotenv>=1.0.0
+
+# YAML processing (already installed by kubernetes)
+# pyyaml>=6.0.0

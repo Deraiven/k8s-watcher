@@ -1,0 +1,33 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  # 证书资源的名称
+  name: shub-us-test61-certificate
+  # 指定将此证书资源和最终生成的 Secret 存放在哪个命名空间
+  # 如果您的 Kong 在 'kong' 命名空间，这里写 'kong' 会很方便
+  namespace: cert-manager
+spec:
+  # 关键：指定最终生成的包含证书和私钥的 K8s Secret 的名称
+  # 您的 Kong 配置（或同步脚本）将引用这个 Secret
+  secretName: shub-test61-tls
+
+  # 证书的通用名 (Common Name)
+  commonName: "*.test61.shub.us"
+
+  # 证书包含的所有域名 (SANs - Subject Alternative Names)
+  dnsNames:
+  - "*.test61.shub.us"
+  - "*.backoffice.test61.shub.us"
+  - "*.beep.test61.shub.us"
+  - "*.market.test61.shub.us"
+
+  # 设置证书的有效期和续期时间
+  # Let's Encrypt 证书有效期为 90 天
+  duration: 2160h # 90d
+  # 在证书过期前 30 天开始尝试续期
+  renewBefore: 720h # 30d
+
+  # 关键：引用第 2 步中创建的 ClusterIssuer
+  issuerRef:
+    name: letsencrypt-dnsmadeeasy-prod
+    kind: ClusterIssuer
