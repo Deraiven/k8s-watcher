@@ -132,7 +132,13 @@ class NamespaceWatcher:
                 self.creation_tasks[namespace_name].append(task)
             
             # Execute all tasks in parallel
-            all_tasks = [cert_task] + parallel_tasks
+            all_tasks = []
+            if cert_task:
+                all_tasks.append(cert_task)
+            if dns_task:
+                all_tasks.append(dns_task)
+            all_tasks.extend(parallel_tasks)
+            
             results = await asyncio.gather(*all_tasks, return_exceptions=True)
             
             # Log any failures
@@ -160,8 +166,11 @@ class NamespaceWatcher:
     
     async def handle_namespace_deleted(self, namespace_name: str):
         """Handle namespace deletion event"""
+        logger.debug(f"Starting deletion for {namespace_name}. In stored: {namespace_name in self.stored_namespaces}, In processing: {namespace_name in self.processing_namespaces}")
+        
         # Check if namespace is being processed or already stored
         if namespace_name not in self.stored_namespaces and namespace_name not in self.processing_namespaces:
+            logger.info(f"Namespace {namespace_name} not found in stored or processing, skipping deletion")
             return
         
         # Cancel creation if still processing

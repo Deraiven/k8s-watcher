@@ -30,13 +30,10 @@ class ZadigManager:
         """Add or remove environment from workflow parameters"""
         async with aiohttp.ClientSession() as session:
             try:
-                # Update backend workflow
+                # Update backend workflow only
                 backend_result = await self._update_backend_workflow(session, action, env)
                 
-                # Update frontend workflow
-                frontend_result = await self._update_frontend_workflow(session, action, env)
-                
-                return backend_result and frontend_result
+                return backend_result
                 
             except Exception as e:
                 logger.error(f"Failed to update workflows: {e}")
@@ -110,60 +107,8 @@ class ZadigManager:
         
         return True
     
-    async def _update_frontend_workflow(self, session: aiohttp.ClientSession, action: str, env: str) -> bool:
-        """Update frontend workflow"""
-        workflow_name = "frontend-service"
-        
-        # Get current workflow configuration
-        url = f"{self.base_url}/openapi/workflows/custom/{workflow_name}/detail?projectKey={self.project_key}"
-        
-        async with session.get(url, headers=self.headers) as response:
-            if response.status != 200:
-                logger.error(f"Failed to get workflow {workflow_name}: {response.status}")
-                return False
-            
-            data = await response.json()
-        
-        # Update cluster parameter
-        params_updated = False
-        for param in data.get('params', []):
-            if param.get('name') == 'cluster':
-                choice_options = param.get('choice_option', [])
-                
-                if action == 'add' and env not in choice_options:
-                    choice_options.append(env)
-                    params_updated = True
-                    logger.info(f"Added {env} to frontend workflow parameters")
-                elif action == 'delete' and env in choice_options:
-                    choice_options.remove(env)
-                    params_updated = True
-                    logger.info(f"Removed {env} from frontend workflow parameters")
-                
-                param['choice_option'] = choice_options
-        
-        # Save updated workflow
-        if params_updated:
-            update_data = {
-                "name": workflow_name,
-                "display_name": data.get('display_name', workflow_name),
-                "concurrency_limit": data.get('concurrency_limit', 10),
-                "project": self.project_key,
-                "params": data.get('params', []),
-                "stages": data.get('stages', [])
-            }
-            
-            update_url = f"{self.base_url}/api/aslan/workflow/v4/{workflow_name}?projectName={self.project_key}"
-            
-            async with session.put(update_url, headers=self.headers, data=json.dumps(update_data)) as response:
-                if response.status >= 200 and response.status < 300:
-                    logger.info(f"Updated frontend workflow {workflow_name}")
-                    return True
-                else:
-                    error_text = await response.text()
-                    logger.error(f"Failed to update workflow: {error_text}")
-                    return False
-        
-        return True
+    # Frontend workflow update removed - no longer needed
+    # The _update_frontend_workflow method has been removed as frontend-service workflow update is no longer required
     
     @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
     async def add_app_to_workflow(self, app: str, env: str) -> bool:
