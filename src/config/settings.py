@@ -2,8 +2,8 @@
 Application configuration management
 """
 import os
-from typing import Optional
-from dataclasses import dataclass
+from typing import Optional, Set
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -63,6 +63,11 @@ class AppConfig:
     namespace_prefix: str = os.getenv("NAMESPACE_PREFIX", "test")
     namespace_label_key: str = os.getenv("NAMESPACE_LABEL_KEY", "createdBy")
     namespace_label_value: str = os.getenv("NAMESPACE_LABEL_VALUE", "koderover")
+    
+    # Excluded namespaces (can be overridden by EXCLUDED_NAMESPACES env var)
+    excluded_namespaces: Set[str] = field(default_factory=lambda: set(
+        os.getenv("EXCLUDED_NAMESPACES", "test17,test33").split(",")
+    ))
     
     # Feature flags
     enable_cert_management: bool = os.getenv("ENABLE_CERT_MANAGEMENT", "true").lower() == "true"

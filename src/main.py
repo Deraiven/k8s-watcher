@@ -59,6 +59,8 @@ class NamespaceWatcher:
                 if self._should_track_namespace(ns):
                     self.stored_namespaces.add(ns.metadata.name)
                     namespaces_to_reconcile.append(ns.metadata.name)
+                elif ns.metadata.name in app_config.excluded_namespaces and ns.metadata.name.startswith(app_config.namespace_prefix):
+                    logger.info(f"Excluding namespace {ns.metadata.name} from tracking")
             
             logger.info(f"Initialized with namespaces [{' '.join(self.stored_namespaces)}]")
             logger.info(f"Initialized with {len(self.stored_namespaces)} existing namespaces")
@@ -74,8 +76,14 @@ class NamespaceWatcher:
     
     def _should_track_namespace(self, namespace) -> bool:
         """Check if namespace should be tracked"""
+        namespace_name = namespace.metadata.name
+        
+        # Exclude specific namespaces
+        if namespace_name in app_config.excluded_namespaces:
+            return False
+        
         return (
-            namespace.metadata.name.startswith(app_config.namespace_prefix) and
+            namespace_name.startswith(app_config.namespace_prefix) and
             namespace.metadata.labels and
             namespace.metadata.labels.get(app_config.namespace_label_key) == app_config.namespace_label_value
         )
