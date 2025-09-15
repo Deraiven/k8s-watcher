@@ -15,6 +15,7 @@ from .managers.cert_manager import CertificateManager
 from .managers.apollo_manager import ApolloManager
 from .managers.kong_manager import KongManager
 from .managers.zadig_manager import ZadigManager
+from .managers.redis_state_manager import RedisStateManager
 from .utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -44,6 +45,7 @@ class NamespaceWatcher:
         self.apollo_manager = ApolloManager() if app_config.enable_apollo_config else None
         self.kong_manager = KongManager() if app_config.enable_kong_routes else None
         self.zadig_manager = ZadigManager() if app_config.enable_zadig_workflow else None
+        self.state_manager = RedisStateManager()
         
         # Shutdown event
         self._shutdown_event = asyncio.Event()
@@ -51,23 +53,56 @@ class NamespaceWatcher:
     async def initialize(self):
         """Initialize the watcher with existing namespaces"""
         try:
-            # Get existing namespaces
+            # Connect to Redis
+            await self.state_manager.connect()
+            
+            # Get tracked namespaces from Redis
+            redis_tracked = await self.state_manager.get_tracked_namespaces()
+            logger.info(f"Found {len(redis_tracked)} namespaces in Redis state")
+            
+            # Get existing namespaces from Kubernetes
             namespaces = await asyncio.to_thread(self.v1.list_namespace)
+            k8s_namespaces = set()
             namespaces_to_reconcile = []
             
             for ns in namespaces.items:
                 if self._should_track_namespace(ns):
-                    self.stored_namespaces.add(ns.metadata.name)
-                    namespaces_to_reconcile.append(ns.metadata.name)
+                    ns_name = ns.metadata.name
+                    k8s_namespaces.add(ns_name)
+                    self.stored_namespaces.add(ns_name)
+                    
+                    # Check if needs reconciliation
+                    if ns_name not in redis_tracked:
+                        logger.info(f"Namespace {ns_name} exists in K8s but not in Redis state")
+                        namespaces_to_reconcile.append(ns_name)
+                    else:
+                        # Check if needs periodic reconciliation
+                        needs_check = await self.state_manager.get_namespaces_needing_reconciliation(hours=24)
+                        if ns_name in needs_check:
+                            namespaces_to_reconcile.append(ns_name)
+                            
                 elif ns.metadata.name in app_config.excluded_namespaces and ns.metadata.name.startswith(app_config.namespace_prefix):
                     logger.info(f"Excluding namespace {ns.metadata.name} from tracking")
+            
+            # Check for namespaces in Redis but not in K8s (deleted while watcher was down)
+            deleted_namespaces = redis_tracked - k8s_namespaces
+            for ns in deleted_namespaces:
+                logger.warning(f"Namespace {ns} exists in Redis but not in K8s, marking as deleted")
+                await self.state_manager.mark_namespace_deleted(ns)
+            
+            # Check for orphaned resources
+            orphaned = await self.state_manager.find_orphaned_resources()
+            if orphaned:
+                logger.warning(f"Found orphaned resources for {len(orphaned)} deleted namespaces")
+                for ns, resources in orphaned.items():
+                    logger.warning(f"Namespace {ns} has orphaned resources: {resources}")
             
             logger.info(f"Initialized with namespaces [{' '.join(self.stored_namespaces)}]")
             logger.info(f"Initialized with {len(self.stored_namespaces)} existing namespaces")
             
-            # Reconcile existing namespaces
+            # Reconcile namespaces that need it
             if namespaces_to_reconcile:
-                logger.info(f"Starting reconciliation for {len(namespaces_to_reconcile)} existing namespaces")
+                logger.info(f"Starting reconciliation for {len(namespaces_to_reconcile)} namespaces")
                 await self._reconcile_namespaces(namespaces_to_reconcile)
             
         except Exception as e:
@@ -178,6 +213,10 @@ class NamespaceWatcher:
             
             # Mark as completed
             self.stored_namespaces.add(namespace_name)
+            
+            # Update Redis state
+            await self.state_manager.mark_namespace_created(namespace_name)
+            
             logger.info(f"Completed namespace creation processing: {namespace_name}")
             
         except asyncio.CancelledError:
@@ -334,6 +373,10 @@ class NamespaceWatcher:
                     logger.error(f"Task {i} failed: {result}")
         
         self.stored_namespaces.discard(namespace_name)
+        
+        # Update Redis state
+        await self.state_manager.mark_namespace_deleted(namespace_name)
+        
         logger.info(f"Completed namespace deletion processing: {namespace_name}")
     
     async def watch_namespaces(self):
@@ -433,6 +476,9 @@ class NamespaceWatcher:
         if self.namespace_tasks:
             logger.info(f"Waiting for {len(self.namespace_tasks)} namespace tasks to complete")
             await asyncio.gather(*self.namespace_tasks, return_exceptions=True)
+        
+        # Disconnect from Redis
+        await self.state_manager.disconnect()
     
     async def run(self):
         """Run the namespace watcher"""

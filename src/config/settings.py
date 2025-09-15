@@ -55,6 +55,14 @@ class CertManagerConfig:
 
 
 @dataclass
+class RedisConfig:
+    """Redis configuration"""
+    url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    key_prefix: str = os.getenv("REDIS_KEY_PREFIX", "namespace-watcher")
+    ttl_days: int = int(os.getenv("REDIS_TTL_DAYS", "30"))
+
+
+@dataclass
 class AppConfig:
     """Main application configuration"""
     reference_env: str = os.getenv("REFERENCE_ENV", "test33")
@@ -85,4 +93,5 @@ kong_config = KongConfig()
 zadig_config = ZadigConfig()
 dns_config = DNSConfig()
 cert_manager_config = CertManagerConfig()
+redis_config = RedisConfig()
 app_config = AppConfig()
