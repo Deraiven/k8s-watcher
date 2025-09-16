@@ -2,8 +2,8 @@
 Application configuration management
 """
 import os
-from typing import Optional
-from dataclasses import dataclass
+from typing import Optional, Set
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -55,6 +55,14 @@ class CertManagerConfig:
 
 
 @dataclass
+class RedisConfig:
+    """Redis configuration"""
+    url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    key_prefix: str = os.getenv("REDIS_KEY_PREFIX", "namespace-watcher")
+    ttl_days: int = int(os.getenv("REDIS_TTL_DAYS", "30"))
+
+
+@dataclass
 class AppConfig:
     """Main application configuration"""
     reference_env: str = os.getenv("REFERENCE_ENV", "test33")
@@ -63,6 +71,11 @@ class AppConfig:
     namespace_prefix: str = os.getenv("NAMESPACE_PREFIX", "test")
     namespace_label_key: str = os.getenv("NAMESPACE_LABEL_KEY", "createdBy")
     namespace_label_value: str = os.getenv("NAMESPACE_LABEL_VALUE", "koderover")
+    
+    # Excluded namespaces (can be overridden by EXCLUDED_NAMESPACES env var)
+    excluded_namespaces: Set[str] = field(default_factory=lambda: set(
+        os.getenv("EXCLUDED_NAMESPACES", "test17,test33").split(",")
+    ))
     
     # Feature flags
     enable_cert_management: bool = os.getenv("ENABLE_CERT_MANAGEMENT", "true").lower() == "true"
@@ -80,4 +93,5 @@ kong_config = KongConfig()
 zadig_config = ZadigConfig()
 dns_config = DNSConfig()
 cert_manager_config = CertManagerConfig()
+redis_config = RedisConfig()
 app_config = AppConfig()
