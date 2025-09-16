@@ -130,9 +130,8 @@ class NamespaceWatcher:
         # Process namespaces in parallel
         tasks = []
         for namespace_name in namespaces:
-            # Directly create resources without marking as processing
-            # This ensures existing namespaces won't block new ADDED events
-            task = asyncio.create_task(self._create_namespace_resources(namespace_name))
+            # Create a task that includes Redis state update
+            task = asyncio.create_task(self._reconcile_single_namespace(namespace_name))
             tasks.append(task)
         
         # Wait for all reconciliations to complete
@@ -147,6 +146,20 @@ class NamespaceWatcher:
                 success_count += 1
         
         logger.info(f"Reconciliation completed: {success_count}/{len(namespaces)} successful")
+    
+    async def _reconcile_single_namespace(self, namespace_name: str):
+        """Reconcile a single namespace with Redis state update"""
+        try:
+            # Create resources
+            await self._create_namespace_resources(namespace_name)
+            
+            # Update Redis state
+            await self.state_manager.mark_namespace_created(namespace_name)
+            logger.debug(f"Updated Redis state for {namespace_name}")
+            
+        except Exception as e:
+            logger.error(f"Failed to reconcile {namespace_name}: {e}")
+            raise
     
     async def _create_namespace_resources(self, namespace_name: str):
         """Create resources for a namespace (used by both creation and reconciliation)"""
