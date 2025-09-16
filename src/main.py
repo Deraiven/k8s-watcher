@@ -344,46 +344,46 @@ class NamespaceWatcher:
             while namespace_name in self.processing_namespaces:
                 await asyncio.sleep(0.1)
         
-        # Only proceed with deletion if namespace was fully created
+        # Check if we should clean up partial resources
         if namespace_name not in self.stored_namespaces:
-            logger.info(f"Namespace {namespace_name} creation was cancelled, skipping deletion")
-            return
+            logger.info(f"Namespace {namespace_name} creation was cancelled, checking for partial resources to clean up")
+            # Continue to deletion to clean up any partially created resources
         
         logger.info(f"Processing namespace deletion: {namespace_name}")
         
-        tasks = []
+        # Group 1: Delete DNS record first (certificate depends on DNS)
+        if self.dns_manager:
+            try:
+                await self.dns_manager.delete_dns_record(namespace_name)
+            except Exception as e:
+                logger.error(f"Failed to delete DNS record: {e}")
+        
+        # Group 2: Delete other resources in parallel
+        parallel_tasks = []
+        
+        # Delete certificate (after DNS is deleted)
+        if self.cert_manager:
+            parallel_tasks.append(self.cert_manager.delete_certificate(namespace_name))
         
         # Delete AWS resources
         if self.aws_manager:
-            tasks.append(self.aws_manager.delete_sqs_queues(namespace_name))
-            tasks.append(self.aws_manager.delete_sns_topic(namespace_name))
-        
-        # Delete DNS record first (before certificate)
-        if self.dns_manager:
-            tasks.append(self.dns_manager.delete_dns_record(namespace_name))
-        
-        # Delete certificate after DNS
-        if self.cert_manager:
-            tasks.append(self.cert_manager.delete_certificate(namespace_name))
-        
-        # Delete Apollo configuration
-        # if self.apollo_manager:
-        #     tasks.append(self.apollo_manager.delete_cluster_config(namespace_name))
+            parallel_tasks.append(self.aws_manager.delete_sqs_queues(namespace_name))
+            parallel_tasks.append(self.aws_manager.delete_sns_topic(namespace_name))
         
         # Delete Kong routes
         if self.kong_manager:
-            tasks.append(self.kong_manager.delete_routes(namespace_name))
+            parallel_tasks.append(self.kong_manager.delete_routes(namespace_name))
         
         # Update Zadig workflows
         if self.zadig_manager:
-            tasks.append(self.zadig_manager.update_workflow_environments('delete', namespace_name))
+            parallel_tasks.append(self.zadig_manager.update_workflow_environments('delete', namespace_name))
         
-        # Execute all tasks
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Execute parallel tasks
+        if parallel_tasks:
+            results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    logger.error(f"Task {i} failed: {result}")
+                    logger.error(f"Delete task {i} failed: {result}")
         
         self.stored_namespaces.discard(namespace_name)
         

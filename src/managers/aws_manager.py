@@ -119,7 +119,10 @@ class AWSManager:
                         deleted_queues.append(queue_name)
                         logger.info(f"Deleted SQS queue: {queue_name}")
                     except ClientError as e:
-                        logger.error(f"Failed to delete queue {queue_name}: {e}")
+                        if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
+                            logger.debug(f"Queue does not exist, skipping: {queue_name}")
+                        else:
+                            logger.error(f"Failed to delete queue {queue_name}: {e}")
         
         return deleted_queues
     
@@ -223,8 +226,8 @@ class AWSManager:
                 return True
                 
             except ClientError as e:
-                if e.response['Error']['Code'] == 'NotFound':
-                    logger.warning(f"Topic not found: {topic_name}")
+                if e.response['Error']['Code'] in ['NotFound', 'NotFoundException']:
+                    logger.debug(f"Topic not found, skipping: {topic_name}")
                 else:
                     logger.error(f"Failed to delete topic: {e}")
                 return False
