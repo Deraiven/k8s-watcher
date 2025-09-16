@@ -15,6 +15,7 @@ from .managers.cert_manager import CertificateManager
 from .managers.apollo_manager import ApolloManager
 from .managers.kong_manager import KongManager
 from .managers.zadig_manager import ZadigManager
+from .managers.redis_state_manager import RedisStateManager
 from .utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -44,6 +45,7 @@ class NamespaceWatcher:
         self.apollo_manager = ApolloManager() if app_config.enable_apollo_config else None
         self.kong_manager = KongManager() if app_config.enable_kong_routes else None
         self.zadig_manager = ZadigManager() if app_config.enable_zadig_workflow else None
+        self.state_manager = RedisStateManager()
         
         # Shutdown event
         self._shutdown_event = asyncio.Event()
@@ -51,13 +53,57 @@ class NamespaceWatcher:
     async def initialize(self):
         """Initialize the watcher with existing namespaces"""
         try:
-            # Get existing namespaces
+            # Connect to Redis
+            await self.state_manager.connect()
+            
+            # Get tracked namespaces from Redis
+            redis_tracked = await self.state_manager.get_tracked_namespaces()
+            logger.info(f"Found {len(redis_tracked)} namespaces in Redis state")
+            
+            # Get existing namespaces from Kubernetes
             namespaces = await asyncio.to_thread(self.v1.list_namespace)
+            k8s_namespaces = set()
+            namespaces_to_reconcile = []
+            
             for ns in namespaces.items:
                 if self._should_track_namespace(ns):
-                    self.stored_namespaces.add(ns.metadata.name)
+                    ns_name = ns.metadata.name
+                    k8s_namespaces.add(ns_name)
+                    self.stored_namespaces.add(ns_name)
+                    
+                    # Check if needs reconciliation
+                    if ns_name not in redis_tracked:
+                        logger.info(f"Namespace {ns_name} exists in K8s but not in Redis state")
+                        namespaces_to_reconcile.append(ns_name)
+                    else:
+                        # Check if needs periodic reconciliation
+                        needs_check = await self.state_manager.get_namespaces_needing_reconciliation(hours=24)
+                        if ns_name in needs_check:
+                            namespaces_to_reconcile.append(ns_name)
+                            
+                elif ns.metadata.name in app_config.excluded_namespaces and ns.metadata.name.startswith(app_config.namespace_prefix):
+                    logger.info(f"Excluding namespace {ns.metadata.name} from tracking")
+            
+            # Check for namespaces in Redis but not in K8s (deleted while watcher was down)
+            deleted_namespaces = redis_tracked - k8s_namespaces
+            for ns in deleted_namespaces:
+                logger.warning(f"Namespace {ns} exists in Redis but not in K8s, marking as deleted")
+                await self.state_manager.mark_namespace_deleted(ns)
+            
+            # Check for orphaned resources
+            orphaned = await self.state_manager.find_orphaned_resources()
+            if orphaned:
+                logger.warning(f"Found orphaned resources for {len(orphaned)} deleted namespaces")
+                for ns, resources in orphaned.items():
+                    logger.warning(f"Namespace {ns} has orphaned resources: {resources}")
+            
             logger.info(f"Initialized with namespaces [{' '.join(self.stored_namespaces)}]")
             logger.info(f"Initialized with {len(self.stored_namespaces)} existing namespaces")
+            
+            # Reconcile namespaces that need it
+            if namespaces_to_reconcile:
+                logger.info(f"Starting reconciliation for {len(namespaces_to_reconcile)} namespaces")
+                await self._reconcile_namespaces(namespaces_to_reconcile)
             
         except Exception as e:
             logger.error(f"Failed to initialize: {e}")
@@ -65,11 +111,106 @@ class NamespaceWatcher:
     
     def _should_track_namespace(self, namespace) -> bool:
         """Check if namespace should be tracked"""
+        namespace_name = namespace.metadata.name
+        
+        # Exclude specific namespaces
+        if namespace_name in app_config.excluded_namespaces:
+            return False
+        
         return (
-            namespace.metadata.name.startswith(app_config.namespace_prefix) and
+            namespace_name.startswith(app_config.namespace_prefix) and
             namespace.metadata.labels and
             namespace.metadata.labels.get(app_config.namespace_label_key) == app_config.namespace_label_value
         )
+    
+    async def _reconcile_namespaces(self, namespaces: List[str]):
+        """Reconcile resources for existing namespaces"""
+        logger.info(f"Reconciling {len(namespaces)} namespaces")
+        
+        # Process namespaces in parallel
+        tasks = []
+        for namespace_name in namespaces:
+            # Create a task that includes Redis state update
+            task = asyncio.create_task(self._reconcile_single_namespace(namespace_name))
+            tasks.append(task)
+        
+        # Wait for all reconciliations to complete
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Log results
+        success_count = 0
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Failed to reconcile {namespaces[i]}: {result}")
+            else:
+                success_count += 1
+        
+        logger.info(f"Reconciliation completed: {success_count}/{len(namespaces)} successful")
+    
+    async def _reconcile_single_namespace(self, namespace_name: str):
+        """Reconcile a single namespace with Redis state update"""
+        try:
+            # Create resources
+            await self._create_namespace_resources(namespace_name)
+            
+            # Update Redis state
+            await self.state_manager.mark_namespace_created(namespace_name)
+            logger.debug(f"Updated Redis state for {namespace_name}")
+            
+        except Exception as e:
+            logger.error(f"Failed to reconcile {namespace_name}: {e}")
+            raise
+    
+    async def _create_namespace_resources(self, namespace_name: str):
+        """Create resources for a namespace (used by both creation and reconciliation)"""
+        # Group 1: Certificate first (cert-manager will handle DNS validation)
+        cert_task = None
+        if self.cert_manager:
+            cert_task = asyncio.create_task(self.cert_manager.create_certificate(namespace_name))
+        
+        # Group 2: DNS record depends on certificate
+        async def create_dns_after_cert():
+            try:
+                if cert_task:
+                    await cert_task
+                if self.dns_manager:
+                    await self.dns_manager.create_dns_record(namespace_name)
+            except asyncio.CancelledError:
+                logger.info(f"DNS creation cancelled for {namespace_name}")
+                raise
+        
+        dns_task = asyncio.create_task(create_dns_after_cert())
+        
+        # Group 3: All other tasks can run in parallel immediately
+        parallel_tasks = []
+        
+        # Create AWS resources
+        if self.aws_manager:
+            parallel_tasks.append(asyncio.create_task(self.aws_manager.create_sqs_queues(namespace_name)))
+            parallel_tasks.append(asyncio.create_task(self.aws_manager.create_sns_topic(namespace_name)))
+        
+        # Create Kong routes
+        if self.kong_manager:
+            parallel_tasks.append(asyncio.create_task(self.kong_manager.create_routes(namespace_name)))
+        
+        # Update Zadig workflows
+        if self.zadig_manager:
+            parallel_tasks.append(asyncio.create_task(self.zadig_manager.update_workflow_environments('add', namespace_name)))
+        
+        # Execute all tasks in parallel
+        all_tasks = []
+        if cert_task:
+            all_tasks.append(cert_task)
+        if dns_task:
+            all_tasks.append(dns_task)
+        all_tasks.extend(parallel_tasks)
+        
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        
+        # Log any failures
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Task {i} failed for {namespace_name}: {result}")
     
     async def handle_namespace_created(self, namespace_name: str):
         """Handle namespace creation event"""
@@ -80,89 +221,101 @@ class NamespaceWatcher:
         self.creation_tasks[namespace_name] = []
         
         try:
-            # Group 1: Certificate first (cert-manager will handle DNS validation)
-            cert_task = None
-            if self.cert_manager:
-                cert_task = asyncio.create_task(self.cert_manager.create_certificate(namespace_name))
-                self.creation_tasks[namespace_name].append(cert_task)
+            # Create all resources (with cancellation support)
+            await self._create_namespace_resources_with_tracking(namespace_name)
             
-            # Group 2: DNS record depends on certificate
-            async def create_dns_after_cert():
-                try:
-                    if cert_task:
-                        await cert_task
-                    if self.dns_manager:
-                        await self.dns_manager.create_dns_record(namespace_name)
-                except asyncio.CancelledError:
-                    logger.info(f"DNS creation cancelled for {namespace_name}")
-                    raise
-            
-            dns_task = asyncio.create_task(create_dns_after_cert())
-            self.creation_tasks[namespace_name].append(dns_task)
-            
-            # Group 3: All other tasks can run in parallel immediately
-            parallel_tasks = []
-            
-            # Create AWS resources
-            if self.aws_manager:
-                task = asyncio.create_task(self.aws_manager.create_sqs_queues(namespace_name))
-                parallel_tasks.append(task)
-                self.creation_tasks[namespace_name].append(task)
-                
-                task = asyncio.create_task(self.aws_manager.create_sns_topic(namespace_name))
-                parallel_tasks.append(task)
-                self.creation_tasks[namespace_name].append(task)
-            
-            # Create Apollo configuration
-            # if self.apollo_manager:
-            #     task = asyncio.create_task(self.apollo_manager.create_cluster_config(namespace_name))
-            #     parallel_tasks.append(task)
-            #     self.creation_tasks[namespace_name].append(task)
-            
-            # Create Kong routes
-            if self.kong_manager:
-                task = asyncio.create_task(self.kong_manager.create_routes(namespace_name))
-                parallel_tasks.append(task)
-                self.creation_tasks[namespace_name].append(task)
-            
-            # Update Zadig workflows
-            if self.zadig_manager:
-                task = asyncio.create_task(self.zadig_manager.update_workflow_environments('add', namespace_name))
-                parallel_tasks.append(task)
-                self.creation_tasks[namespace_name].append(task)
-            
-            # Execute all tasks in parallel
-            all_tasks = []
-            if cert_task:
-                all_tasks.append(cert_task)
-            if dns_task:
-                all_tasks.append(dns_task)
-            all_tasks.extend(parallel_tasks)
-            
-            results = await asyncio.gather(*all_tasks, return_exceptions=True)
-            
-            # Log any failures
-            cancelled_count = 0
-            for i, result in enumerate(results):
-                if isinstance(result, asyncio.CancelledError):
-                    cancelled_count += 1
-                elif isinstance(result, Exception):
-                    logger.error(f"Task {i} failed: {result}")
-            
-            if cancelled_count > 0:
-                logger.warning(f"Creation cancelled for {namespace_name}: {cancelled_count} tasks were cancelled")
-                return
-            
+            # Mark as completed
             self.stored_namespaces.add(namespace_name)
+            
+            # Update Redis state
+            await self.state_manager.mark_namespace_created(namespace_name)
+            
             logger.info(f"Completed namespace creation processing: {namespace_name}")
             
         except asyncio.CancelledError:
             logger.info(f"Creation process cancelled for {namespace_name}")
             raise
+        except Exception as e:
+            logger.error(f"Failed to create resources for {namespace_name}: {e}")
+            raise
         finally:
             # Always remove from processing set and tasks
             self.processing_namespaces.discard(namespace_name)
             self.creation_tasks.pop(namespace_name, None)
+    
+    async def _create_namespace_resources_with_tracking(self, namespace_name: str):
+        """Create resources with task tracking for cancellation support"""
+        # Group 1: Certificate first (cert-manager will handle DNS validation)
+        cert_task = None
+        if self.cert_manager:
+            cert_task = asyncio.create_task(self.cert_manager.create_certificate(namespace_name))
+            if namespace_name in self.creation_tasks:
+                self.creation_tasks[namespace_name].append(cert_task)
+        
+        # Group 2: DNS record depends on certificate
+        async def create_dns_after_cert():
+            try:
+                if cert_task:
+                    await cert_task
+                if self.dns_manager:
+                    await self.dns_manager.create_dns_record(namespace_name)
+            except asyncio.CancelledError:
+                logger.info(f"DNS creation cancelled for {namespace_name}")
+                raise
+        
+        dns_task = asyncio.create_task(create_dns_after_cert())
+        if namespace_name in self.creation_tasks:
+            self.creation_tasks[namespace_name].append(dns_task)
+        
+        # Group 3: All other tasks can run in parallel immediately
+        parallel_tasks = []
+        
+        # Create AWS resources
+        if self.aws_manager:
+            task = asyncio.create_task(self.aws_manager.create_sqs_queues(namespace_name))
+            parallel_tasks.append(task)
+            if namespace_name in self.creation_tasks:
+                self.creation_tasks[namespace_name].append(task)
+            
+            task = asyncio.create_task(self.aws_manager.create_sns_topic(namespace_name))
+            parallel_tasks.append(task)
+            if namespace_name in self.creation_tasks:
+                self.creation_tasks[namespace_name].append(task)
+        
+        # Create Kong routes
+        if self.kong_manager:
+            task = asyncio.create_task(self.kong_manager.create_routes(namespace_name))
+            parallel_tasks.append(task)
+            if namespace_name in self.creation_tasks:
+                self.creation_tasks[namespace_name].append(task)
+        
+        # Update Zadig workflows
+        if self.zadig_manager:
+            task = asyncio.create_task(self.zadig_manager.update_workflow_environments('add', namespace_name))
+            parallel_tasks.append(task)
+            if namespace_name in self.creation_tasks:
+                self.creation_tasks[namespace_name].append(task)
+        
+        # Execute all tasks in parallel
+        all_tasks = []
+        if cert_task:
+            all_tasks.append(cert_task)
+        if dns_task:
+            all_tasks.append(dns_task)
+        all_tasks.extend(parallel_tasks)
+        
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        
+        # Log any failures
+        cancelled_count = 0
+        for i, result in enumerate(results):
+            if isinstance(result, asyncio.CancelledError):
+                cancelled_count += 1
+            elif isinstance(result, Exception):
+                logger.error(f"Task {i} failed for {namespace_name}: {result}")
+        
+        if cancelled_count > 0:
+            raise asyncio.CancelledError(f"Creation cancelled for {namespace_name}: {cancelled_count} tasks were cancelled")
     
     async def handle_namespace_deleted(self, namespace_name: str):
         """Handle namespace deletion event"""
@@ -233,6 +386,10 @@ class NamespaceWatcher:
                     logger.error(f"Task {i} failed: {result}")
         
         self.stored_namespaces.discard(namespace_name)
+        
+        # Update Redis state
+        await self.state_manager.mark_namespace_deleted(namespace_name)
+        
         logger.info(f"Completed namespace deletion processing: {namespace_name}")
     
     async def watch_namespaces(self):
@@ -332,6 +489,9 @@ class NamespaceWatcher:
         if self.namespace_tasks:
             logger.info(f"Waiting for {len(self.namespace_tasks)} namespace tasks to complete")
             await asyncio.gather(*self.namespace_tasks, return_exceptions=True)
+        
+        # Disconnect from Redis
+        await self.state_manager.disconnect()
     
     async def run(self):
         """Run the namespace watcher"""
