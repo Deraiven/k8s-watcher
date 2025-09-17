@@ -395,6 +395,7 @@ class NamespaceWatcher:
     async def watch_namespaces(self):
         """Watch for namespace events"""
         logger.info("Starting namespace watch")
+        last_heartbeat = asyncio.get_event_loop().time()
         
         while not self._shutdown_event.is_set():
             try:
@@ -406,8 +407,8 @@ class NamespaceWatcher:
                 def run_watch():
                     try:
                         w = watch.Watch()
-                        # Stream will continue indefinitely unless stopped
-                        for event in w.stream(self.v1.list_namespace, timeout_seconds=0):
+                        # Use timeout to prevent indefinite blocking
+                        for event in w.stream(self.v1.list_namespace, timeout_seconds=300):  # 5 minutes timeout
                             # Put event in queue
                             future = asyncio.run_coroutine_threadsafe(
                                 event_queue.put(event),
@@ -419,6 +420,12 @@ class NamespaceWatcher:
                         # Put exception as special event
                         asyncio.run_coroutine_threadsafe(
                             event_queue.put({'type': 'ERROR', 'error': e}),
+                            loop
+                        ).result()
+                    finally:
+                        # Signal that watch has ended
+                        asyncio.run_coroutine_threadsafe(
+                            event_queue.put({'type': 'WATCH_ENDED'}),
                             loop
                         ).result()
                 
@@ -434,9 +441,12 @@ class NamespaceWatcher:
                         # Wait for event with timeout
                         event = await asyncio.wait_for(event_queue.get(), timeout=5.0)
                         
-                        # Check for error event
+                        # Check for special events
                         if event.get('type') == 'ERROR':
                             raise event['error']
+                        elif event.get('type') == 'WATCH_ENDED':
+                            logger.info("Watch stream ended, restarting...")
+                            break  # Break inner loop to restart watch
                         
                         namespace = event['object']
                         event_type = event['type']
@@ -464,7 +474,11 @@ class NamespaceWatcher:
                             task.add_done_callback(lambda t: self.namespace_tasks.discard(t))
                             
                     except asyncio.TimeoutError:
-                        # No events in queue, continue
+                        # No events in queue, check heartbeat
+                        current_time = asyncio.get_event_loop().time()
+                        if current_time - last_heartbeat > 60:  # Log every minute
+                            logger.debug("Namespace watcher is alive, waiting for events...")
+                            last_heartbeat = current_time
                         continue
                         
             except ApiException as e:
