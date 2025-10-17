@@ -61,49 +61,49 @@ class ApolloManager:
             """, (env, self.reference_env))
             
             # 2. Copy namespaces
-            await cursor.execute("""
-                INSERT INTO Namespace (AppId, ClusterName, NamespaceName, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime)
-                SELECT AppId, %s, NamespaceName, IsDeleted, 'namespace-watcher', NOW()
-                FROM Namespace
-                WHERE ClusterName = %s
-            """, (env, self.reference_env))
+            # await cursor.execute("""
+            #     INSERT INTO Namespace (AppId, ClusterName, NamespaceName, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime)
+            #     SELECT AppId, %s, NamespaceName, IsDeleted, 'namespace-watcher', NOW()
+            #     FROM Namespace
+            #     WHERE ClusterName = %s
+            # """, (env, self.reference_env))
             
             # 3. Copy items (configuration values)
-            await cursor.execute("""
-                INSERT INTO Item (NamespaceId, Key, Type, Value, Comment, LineNum, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime)
-                SELECT 
-                    n2.Id,
-                    i.Key,
-                    i.Type,
-                    i.Value,
-                    i.Comment,
-                    i.LineNum,
-                    i.IsDeleted,
-                    'namespace-watcher',
-                    NOW()
-                FROM Item i
-                JOIN Namespace n1 ON i.NamespaceId = n1.Id
-                JOIN Namespace n2 ON n1.AppId = n2.AppId AND n1.NamespaceName = n2.NamespaceName
-                WHERE n1.ClusterName = %s AND n2.ClusterName = %s
-            """, (self.reference_env, env))
+            # await cursor.execute("""
+            #     INSERT INTO Item (NamespaceId, Key, Type, Value, Comment, LineNum, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime)
+            #     SELECT 
+            #         n2.Id,
+            #         i.Key,
+            #         i.Type,
+            #         i.Value,
+            #         i.Comment,
+            #         i.LineNum,
+            #         i.IsDeleted,
+            #         'namespace-watcher',
+            #         NOW()
+            #     FROM Item i
+            #     JOIN Namespace n1 ON i.NamespaceId = n1.Id
+            #     JOIN Namespace n2 ON n1.AppId = n2.AppId AND n1.NamespaceName = n2.NamespaceName
+            #     WHERE n1.ClusterName = %s AND n2.ClusterName = %s
+            # """, (self.reference_env, env))
             
             # 4. Create initial release
-            await cursor.execute("""
-                INSERT INTO `Release` (AppId, ClusterName, NamespaceName, Name, Configurations, Comment, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime)
-                SELECT 
-                    AppId, 
-                    %s,
-                    NamespaceName,
-                    CONCAT('Initial release for ', %s),
-                    Configurations,
-                    'Created by namespace-watcher',
-                    IsDeleted,
-                    'namespace-watcher',
-                    NOW()
-                FROM `Release`
-                WHERE ClusterName = %s AND IsDeleted = 0
-                GROUP BY AppId, NamespaceName
-            """, (env, env, self.reference_env))
+            # await cursor.execute("""
+            #     INSERT INTO `Release` (AppId, ClusterName, NamespaceName, Name, Configurations, Comment, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime)
+            #     SELECT 
+            #         AppId, 
+            #         %s,
+            #         NamespaceName,
+            #         CONCAT('Initial release for ', %s),
+            #         Configurations,
+            #         'Created by namespace-watcher',
+            #         IsDeleted,
+            #         'namespace-watcher',
+            #         NOW()
+            #     FROM `Release`
+            #     WHERE ClusterName = %s AND IsDeleted = 0
+            #     GROUP BY AppId, NamespaceName
+            # """, (env, env, self.reference_env))
             
             # Commit transaction
             await conn.commit()
