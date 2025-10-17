@@ -378,6 +378,9 @@ class NamespaceWatcher:
         if self.zadig_manager:
             parallel_tasks.append(self.zadig_manager.update_workflow_environments('delete', namespace_name))
         
+        #clear apolli config 
+        if self.apollo_manager:
+            parallel_tasks.append(self.apollo_manager.delete_cluster_config(namespace_name))
         # Execute parallel tasks
         if parallel_tasks:
             results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
