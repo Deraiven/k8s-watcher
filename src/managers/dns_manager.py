@@ -8,6 +8,10 @@ import json
 from typing import Dict, List, Optional
 import aiohttp
 
+from ..utils.logger import setup_logger
+from ..utils.retry import async_retry
+
+
 from ..config.settings import cloudflare_config
 
 logger = setup_logger(__name__)
