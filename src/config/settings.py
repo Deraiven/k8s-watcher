@@ -36,6 +36,11 @@ class ZadigConfig:
     url: str = os.getenv("ZADIG_URL", "http://zadigx.shub.us")
     token: Optional[str] = os.getenv("ZADIG_TOKEN")
     project_key: str = os.getenv("ZADIG_PROJECT_KEY", "fat-base-envrionment")
+    repo_owner: str = os.getenv("ZADIG_GIT_REPO_OWNER", "your-git-org")
+    repo_name_template: str = os.getenv("ZADIG_GIT_REPO_NAME_TEMPLATE", "{namespace_name}")
+    service_name_template: str = os.getenv("ZADIG_GIT_SERVICE_NAME_TEMPLATE", "{namespace_name}")
+    git_trigger_events: list[str] = field(default_factory=lambda: os.getenv("ZADIG_GIT_TRIGGER_EVENTS", "push").split(","))
+    default_git_branch: str = os.getenv("ZADIG_DEFAULT_GIT_BRANCH", "main")
 
 
 @dataclass
