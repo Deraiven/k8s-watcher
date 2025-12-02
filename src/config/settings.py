@@ -44,18 +44,18 @@ class ZadigConfig:
 
 
 @dataclass
-class DNSConfig:
-    """DNS Made Easy configuration"""
-    api_key: Optional[str] = os.getenv("DNS_API_KEY")
-    secret_key: Optional[str] = os.getenv("DNS_SECRET_KEY")
-    api_url: str = "https://api.dnsmadeeasy.com/V2.0"
+class CloudflareConfig:
+    """Cloudflare DNS configuration"""
+    api_token: Optional[str] = os.getenv("CLOUDFLARE_API_TOKEN")
+    zone_id: Optional[str] = os.getenv("CLOUDFLARE_ZONE_ID")
+    api_url: str = "https://api.cloudflare.com/client/v4"
 
 
 @dataclass
 class CertManagerConfig:
     """cert-manager configuration"""
     namespace: str = os.getenv("CERT_MANAGER_NAMESPACE", "cert-manager")
-    issuer_name: str = os.getenv("CERT_MANAGER_ISSUER", "letsencrypt-dnsmadeeasy-prod")
+    issuer_name: str = os.getenv("CERT_MANAGER_ISSUER", "letsencrypt-cloudflare")
     issuer_kind: str = os.getenv("CERT_MANAGER_ISSUER_KIND", "ClusterIssuer")
 
 
@@ -87,7 +87,7 @@ class AppConfig:
     enable_dns_management: bool = os.getenv("ENABLE_DNS_MANAGEMENT", "true").lower() == "true"
     enable_aws_resources: bool = os.getenv("ENABLE_AWS_RESOURCES", "true").lower() == "true"
     enable_kong_routes: bool = os.getenv("ENABLE_KONG_ROUTES", "true").lower() == "true"
-    enable_apollo_config: bool = os.getenv("ENABLE_APOLLO_CONFIG", "false").lower() == "true"
+    enable_apollo_config: bool = os.getenv("ENABLE_APOLLO_CONFIG", "true").lower() == "true"
     enable_zadig_workflow: bool = os.getenv("ENABLE_ZADIG_WORKFLOW", "true").lower() == "true"
 
 
@@ -96,7 +96,7 @@ aws_config = AWSConfig()
 db_config = DatabaseConfig()
 kong_config = KongConfig()
 zadig_config = ZadigConfig()
-dns_config = DNSConfig()
+cloudflare_config = CloudflareConfig()
 cert_manager_config = CertManagerConfig()
 redis_config = RedisConfig()
 app_config = AppConfig()
