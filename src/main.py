@@ -10,7 +10,7 @@ from kubernetes.client.rest import ApiException
 
 from .config.settings import app_config
 from .managers.aws_manager import AWSManager
-from .managers.dns_manager import DNSManager
+from .managers.dns_manager import CloudflareDNSManager
 from .managers.cert_manager import CertificateManager
 from .managers.apollo_manager import ApolloManager
 from .managers.kong_manager import KongManager
@@ -40,7 +40,7 @@ class NamespaceWatcher:
         
         # Initialize managers
         self.aws_manager = AWSManager() if app_config.enable_aws_resources else None
-        self.dns_manager = DNSManager() if app_config.enable_dns_management else None
+        self.dns_manager = CloudflareDNSManager() if app_config.enable_dns_management else None
         self.cert_manager = CertificateManager() if app_config.enable_cert_management else None
         self.apollo_manager = ApolloManager() if app_config.enable_apollo_config else None
         self.kong_manager = KongManager() if app_config.enable_kong_routes else None
