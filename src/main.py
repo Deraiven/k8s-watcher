@@ -196,9 +196,9 @@ class NamespaceWatcher:
         trigger_added = await self.zadig_manager.add_git_trigger(
             service_name=service_name,
             repo_owner=zadig_config.repo_owner, # Use configured default
-            repo_name=resolved_repo_name,
             branch=resolved_branch,
-            events=zadig_config.git_trigger_events
+            events=zadig_config.git_trigger_events,
+            env=namespace_name  # Pass the namespace as environment
         )
 
         if trigger_added:
