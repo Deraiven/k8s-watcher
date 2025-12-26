@@ -1,0 +1,35 @@
+# Ignore .git directory
+.git
+
+# Ignore virtual environment
+venv/
+
+# Ignore Python cache directories
+__pycache__/
+*.pyc
+*.pyo
+*~
+
+# Ignore build artifacts
+*.egg-info/
+.coverage
+.pytest_cache/
+
+# Ignore local environment variables
+.env
+.env.example
+
+# Ignore temporary files
+*.tmp
+*.log
+
+# Ignore documentation files
+docs/
+
+# Ignore test files
+tests/
+
+# Ignore run scripts and setup scripts
+run_local.py
+setup.sh
+start.sh
