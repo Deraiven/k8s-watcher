@@ -113,7 +113,7 @@ class ZadigManager:
             
             update_url = f"{self.base_url}/api/aslan/workflow/v4/{workflow_name}?projectName={self.project_key}"
             
-            async with session.put(update_url, headers=self.headers, data=json.dumps(update_data, )) as response:
+            async with session.put(update_url, headers=self.headers, data=json.dumps(update_data, ensure_ascii=False)) as response:
                 if response.status >= 200 and response.status < 300:
                     logger.info(f"Updated backend workflow {workflow_name}")
                     return True
