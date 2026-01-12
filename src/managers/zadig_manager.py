@@ -38,7 +38,7 @@ class ZadigManager:
             except Exception as e:
                 logger.error(f"Failed to update workflows: {e}")
                 raise
-    async def fix_workflow_data(self, data):
+    def fix_workflow_data(self, data):
     # 将脚本中的单反斜杠替换为双反斜杠，避开 YAML 转义检查
         if isinstance(data, dict):
             for k, v in data.items():
@@ -113,7 +113,7 @@ class ZadigManager:
             
             update_url = f"{self.base_url}/api/aslan/workflow/v4/{workflow_name}?projectName={self.project_key}"
             
-            async with session.put(update_url, headers=self.headers, data=json.dumps(update_data)) as response:
+            async with session.put(update_url, headers=self.headers, data=json.dumps(update_data, )) as response:
                 if response.status >= 200 and response.status < 300:
                     logger.info(f"Updated backend workflow {workflow_name}")
                     return True
