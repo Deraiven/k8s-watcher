@@ -35,7 +35,7 @@ class ZadigConfig:
     """Zadig configuration"""
     url: str = os.getenv("ZADIG_URL", "http://zadigx.shub.us")
     token: Optional[str] = os.getenv("ZADIG_TOKEN")
-    project_key: str = os.getenv("ZADIG_PROJECT_KEY", "fat-base-envrionment")
+    project_key: str = os.getenv("ZADIG_PROJECT_KEY", "fat")
 
 
 @dataclass
