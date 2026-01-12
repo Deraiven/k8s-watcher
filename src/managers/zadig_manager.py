@@ -87,6 +87,7 @@ class ZadigManager:
         if params_updated or action == 'delete':
             update_data = {
                 "name": workflow_name,
+                "project": self.project_key,
                 "display_name": data.get('display_name', 'fat-pipelines'),
                 "concurrency_limit": data.get('concurrency_limit', 10),
                 "project": self.project_key,
