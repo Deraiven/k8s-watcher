@@ -38,6 +38,19 @@ class ZadigManager:
             except Exception as e:
                 logger.error(f"Failed to update workflows: {e}")
                 raise
+    async def fix_workflow_data(self, data):
+    # 将脚本中的单反斜杠替换为双反斜杠，避开 YAML 转义检查
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if k == 'script' and isinstance(v, str):
+                    # 核心修复：处理 \033 等转义序列
+                    data[k] = v.replace('\\', '\\\\')
+                else:
+                    self.fix_workflow_data(v)
+        elif isinstance(data, list):
+            for item in data:
+                self.fix_workflow_data(item)
+        return data
     
     async def _update_backend_workflow(self, session: aiohttp.ClientSession, action: str, env: str) -> bool:
         """Update backend workflow (fat-pipelines)"""
@@ -85,14 +98,17 @@ class ZadigManager:
         
         # Save updated workflow
         if params_updated or action == 'delete':
-            logger.info(f"updated pramas is {data.get('params')}")
+            stages = data.get('stages', [])
+            # 2. 将 stages 对象先转成 JSON 字符串，把所有单个反斜杠变成双反斜杠
+# 这样发送过去后，Zadig 存入 YAML 的就是原始字符 '\033' 而不是转义后的控制符
+            fixed_stages = self.fix_workflow_data(stages)
             update_data = {
                 "name": workflow_name,
                 "display_name": data.get('display_name', 'fat-pipelines'),
                 "concurrency_limit": data.get('concurrency_limit', 10),
                 "project": self.project_key,
                 "params": data.get('params', []),
-                "stages": data.get('stages', [])
+                "stages": fixed_stages
             }
             
             update_url = f"{self.base_url}/api/aslan/workflow/v4/{workflow_name}?projectName={self.project_key}"
