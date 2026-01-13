@@ -98,17 +98,17 @@ class ZadigManager:
         
         # Save updated workflow
         if params_updated or action == 'delete':
-            stages = data.get('stages', [])
+            
             # 2. 将 stages 对象先转成 JSON 字符串，把所有单个反斜杠变成双反斜杠
 # 这样发送过去后，Zadig 存入 YAML 的就是原始字符 '\033' 而不是转义后的控制符
-            fixed_stages = self.fix_workflow_data(stages)
+            # fixed_stages = self.fix_workflow_data(stages)
             update_data = {
                 "name": workflow_name,
                 "display_name": data.get('display_name', 'fat-pipelines'),
                 "concurrency_limit": data.get('concurrency_limit', 10),
                 "project": self.project_key,
                 "params": data.get('params', []),
-                "stages": fixed_stages
+                "stages": data.get('stages', [])
             }
             
             update_url = f"{self.base_url}/api/aslan/workflow/v4/{workflow_name}?projectName={self.project_key}"
