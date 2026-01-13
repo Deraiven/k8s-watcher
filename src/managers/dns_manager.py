@@ -71,7 +71,7 @@ class CloudflareDNSManager:
                     if response.status == 200 and response_json.get('success'):
                         logger.info(f"Created DNS record: {record_name}")
                         return True
-                    elif response.status == 400 and any('record already exists' in err.get('message', '').lower() for err in response_json.get('errors', [])):
+                    elif response.status == 400 and any('record with that host already exists' in err.get('message', '').lower() for err in response_json.get('errors', [])):
                         logger.info(f"DNS record already exists: {record_name}, skipping")
                         return True
                     else:
