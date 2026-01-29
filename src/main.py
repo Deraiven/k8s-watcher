@@ -17,6 +17,7 @@ from .managers.kong_manager import KongManager
 from .managers.zadig_manager import ZadigManager
 from .managers.redis_state_manager import RedisStateManager
 from .utils.logger import setup_logger
+from .utils.schedule import AdvancedScheduler
 
 logger = setup_logger(__name__)
 
@@ -55,7 +56,10 @@ class NamespaceWatcher:
         try:
             # Connect to Redis
             await self.state_manager.connect()
-            
+            # 查看定时任务
+            AdvancedScheduler.start()
+            logger.info("List the schedule job")
+            AdvancedScheduler.list_tasks()
             # Get tracked namespaces from Redis
             redis_tracked = await self.state_manager.get_tracked_namespaces()
             logger.info(f"Found {len(redis_tracked)} namespaces in Redis state")
@@ -497,7 +501,10 @@ class NamespaceWatcher:
     
     
     async def shutdown(self):
+
         """Graceful shutdown"""
+        logger.info("stop the scheduler")
+        AdvancedScheduler.stop()
         logger.info("Shutting down namespace watcher")
         self._shutdown_event.set()
         self.watcher.stop()
