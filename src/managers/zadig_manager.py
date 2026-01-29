@@ -4,10 +4,13 @@ Zadig workflow manager
 import json
 from typing import Dict, List, Any, Optional
 import aiohttp
-
+import asyncio
+import time
+import datetime
 from ..config.settings import zadig_config, app_config
 from ..utils.logger import setup_logger
 from ..utils.retry import async_retry
+from ..utils.schedule import AdvancedScheduler
 
 logger = setup_logger(__name__)
 
@@ -25,6 +28,76 @@ class ZadigManager:
             "Content-Type": "application/json"
         }
     
+    @classmethod # 使用 classmethod 方便装饰器直接调用
+    @AdvancedScheduler.daily(time_str="03:00", description="自动清理Zadig过期环境")
+    def scheduled_cleanup_job(cls):
+        """调度器触发的入口函数"""
+        manager = cls() # 实例化 manager
+        # 因为调度器在独立线程运行，这里需要处理异步循环
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(manager.cleanup_expired_environments())
+        finally:
+            loop.close()
+
+
+    async def get_environments(self):
+        """获取项目下所有环境"""
+        url = f"{self.base_url}/openapi/environments?projectKey={self.project_key}"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, headers=self.headers) as resp:
+                    if resp.status != 200:
+                        logger.error(f"获取环境列表失败: {resp.status}")
+                        return
+                    return await resp.json()  # 必须 await
+            except Exception as e:
+                logger.error(f"请求环境列表异常: {e}")
+                raise
+            
+    async def cleanup_expired_environments(self):
+        """执行具体的清理逻辑"""
+        logger.info("开始执行环境清理巡检...")
+        
+        # 1. 获取所有环境信息 (这里假设你有一个获取列表的方法)
+        # envs = await self.get_environments_from_zadig() 
+        # 这里用你之前提供的 JSON 列表逻辑
+        whiteList = ["test17", "test33", "test5", "test50"]
+        envList = await self.get_environments()
+        expiry_threshold = int(time.time()) - (15 * 24 * 60 * 60)
+        
+        for env in envList:
+            env_name = env.get('env_key') # 根据实际字段取值
+            update_time = env.get('update_time', 0)
+            is_production = env.get('production', False)
+            status = env.get("status") 
+
+            # 3. 过滤逻辑：非生产环境 且 超过15天未更新
+            if not is_production and update_time < expiry_threshold and status != "sleeping" and env_name not in whiteList:
+                last_date = datetime.datetime.fromtimestamp(update_time).strftime('%Y-%m-%d')
+                logger.info(f"🚩 检测到过期环境: {env_name} (最后更新时间: {last_date})")
+
+                # 第二步：如果工作流更新成功（或容错），执行物理删除环境
+                await self._clear_environment(env_name)
+        
+        logger.info("环境清理巡检完成。")
+    
+    @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
+    async def _clear_environment(self, env):
+        url = f"{self.base_url}/openapi/environments/{env}?projectKey={self.project_key}&isDelete=true"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.delete(url, headers=self.headers) as resp:
+                    if resp.status < 300:
+                        logger.info(f"删除环境{env} 成功: {resp.status}")
+                        return True
+                    logger.error(f"删除环境{env} 失败: {resp.status}")
+                    return False
+            except Exception as e:
+                logger.error(f"删除环境异常: {e}")
+                raise
+
     @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
     async def update_workflow_environments(self, action: str, env: str) -> bool:
         """Add or remove environment from workflow parameters"""
@@ -38,6 +111,7 @@ class ZadigManager:
             except Exception as e:
                 logger.error(f"Failed to update workflows: {e}")
                 raise
+    
     def fix_workflow_data(self, data):
     # 将脚本中的单反斜杠替换为双反斜杠，避开 YAML 转义检查
         if isinstance(data, dict):
