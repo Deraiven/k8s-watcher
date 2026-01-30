@@ -28,7 +28,7 @@ class ZadigManager:
             "Content-Type": "application/json"
         }
     
-    @classmethod # 使用 classmethod 方便装饰器直接调用
+    @staticmethod # 使用 classmethod 方便装饰器直接调用
     @AdvancedScheduler.daily(time_str="03:00", description="自动清理Zadig过期环境")
     def scheduled_cleanup_job(cls):
         """调度器触发的入口函数"""
