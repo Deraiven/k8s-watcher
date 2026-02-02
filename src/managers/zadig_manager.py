@@ -30,9 +30,9 @@ class ZadigManager:
     
     @staticmethod # 使用 classmethod 方便装饰器直接调用
     @AdvancedScheduler.daily(time_str="03:00", description="自动清理Zadig过期环境")
-    def scheduled_cleanup_job(cls):
+    def scheduled_cleanup_job():
         """调度器触发的入口函数"""
-        manager = cls() # 实例化 manager
+        manager = ZadigManager() # 实例化 manager
         # 因为调度器在独立线程运行，这里需要处理异步循环
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
