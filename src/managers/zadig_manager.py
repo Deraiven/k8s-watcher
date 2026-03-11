@@ -63,7 +63,7 @@ class ZadigManager:
         # 1. 获取所有环境信息 (这里假设你有一个获取列表的方法)
         # envs = await self.get_environments_from_zadig() 
         # 这里用你之前提供的 JSON 列表逻辑
-        whiteList = ["test17", "test33", "test5", "test50"]
+        whiteList = ["test17", "test33", "test5", "test50", "test66"]
         envList = await self.get_environments()
         expiry_threshold = int(time.time()) - (15 * 24 * 60 * 60)
         
@@ -198,77 +198,4 @@ class ZadigManager:
         
         return True
     
-    # Frontend workflow update removed - no longer needed
-    # The _update_frontend_workflow method has been removed as frontend-service workflow update is no longer required
     
-    # @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
-    # async def add_app_to_workflow(self, app: str, env: str) -> bool:
-    #     """Add application configuration to workflow"""
-    #     if app == "bo-v1-assets" or app.startswith("backoffice-v1-web"):
-    #         # Skip certain apps
-    #         return True
-        
-    #     # Normalize app name
-    #     if app.startswith("backoffice-v1-web"):
-    #         app = "backoffice-v1-web"
-        
-    #     workflow_name = "test33"
-        
-    #     async with aiohttp.ClientSession() as session:
-    #         # Get current workflow configuration
-    #         url = f"{self.base_url}/openapi/workflows/custom/{workflow_name}/detail?projectKey={self.project_key}"
-            
-    #         async with session.get(url, headers=self.headers) as response:
-    #             if response.status != 200:
-    #                 return False
-                
-    #             data = await response.json()
-            
-    #         # Find the configuration stage
-    #         stages = data.get('stages', [])
-    #         updated = False
-            
-    #         for stage in stages:
-    #             if stage.get('name') == '配置检查':
-    #                 for job in stage.get('jobs', []):
-    #                     if job.get('name') == '配置变更':
-    #                         namespace_list = job.get('spec', {}).get('namespaceList', [])
-                            
-    #                         # Check if config already exists
-    #                         existing = any(
-    #                             ns.get('appID') == app and ns.get('clusterID') == env 
-    #                             for ns in namespace_list
-    #                         )
-                            
-    #                         if not existing:
-    #                             # Add new configuration
-    #                             new_config = {
-    #                                 "appID": app,
-    #                                 "clusterID": env,
-    #                                 "env": "FAT",
-    #                                 "kv": [],
-    #                                 "namespace": f"web.{app}",
-    #                                 "original_config": [],
-    #                                 "type": "properties"
-    #                             }
-    #                             namespace_list.append(new_config)
-    #                             updated = True
-    #                             logger.info(f"Added {app} configuration for {env}")
-            
-    #         # Save if updated
-    #         if updated:
-    #             update_url = f"{self.base_url}/api/aslan/workflow/v4/{workflow_name}?projectName={self.project_key}"
-                
-    #             async with session.put(
-    #                 update_url, 
-    #                 headers=self.headers, 
-    #                 data=json.dumps(data)
-    #             ) as response:
-    #                 if response.status >= 200 and response.status < 300:
-    #                     logger.info("Updated workflow configuration")
-    #                     return True
-    #                 else:
-    #                     logger.error("Failed to update workflow configuration")
-    #                     return False
-            
-    #         return True
