@@ -16,6 +16,7 @@ from .managers.apollo_manager import ApolloManager
 from .managers.kong_manager import KongManager
 from .managers.zadig_manager import ZadigManager
 from .managers.redis_state_manager import RedisStateManager
+from .managers.subenv_monitor import SubEnvironmentMonitor
 from .utils.logger import setup_logger
 from .utils.schedule import AdvancedScheduler
 
@@ -47,6 +48,16 @@ class NamespaceWatcher:
         self.kong_manager = KongManager() if app_config.enable_kong_routes else None
         self.zadig_manager = ZadigManager() if app_config.enable_zadig_workflow else None
         self.state_manager = RedisStateManager()
+        self.subenv_monitor = None
+        if app_config.enable_subenv_monitor and self.zadig_manager:
+            self.subenv_monitor = SubEnvironmentMonitor(
+                zadig_manager=self.zadig_manager,
+                namespace_prefix=app_config.namespace_prefix,
+                excluded_namespaces=app_config.excluded_namespaces,
+                refresh_interval_seconds=app_config.subenv_refresh_interval_seconds,
+                on_created=self.handle_subenv_deployment_created,
+                on_deleted=self.handle_subenv_deployment_deleted,
+            )
         
         # Shutdown event
         self._shutdown_event = asyncio.Event()
@@ -233,6 +244,10 @@ class NamespaceWatcher:
             
             # Update Redis state
             await self.state_manager.mark_namespace_created(namespace_name)
+
+            # Add newly created namespace to sub-environment monitoring list
+            if self.subenv_monitor:
+                await self.subenv_monitor.add_namespace(namespace_name)
             
             logger.info(f"Completed namespace creation processing: {namespace_name}")
             
@@ -396,6 +411,10 @@ class NamespaceWatcher:
         
         # Update Redis state
         await self.state_manager.mark_namespace_deleted(namespace_name)
+
+        # Remove deleted namespace from sub-environment monitoring list
+        if self.subenv_monitor:
+            await self.subenv_monitor.remove_namespace(namespace_name)
         
         logger.info(f"Completed namespace deletion processing: {namespace_name}")
     
@@ -498,6 +517,48 @@ class NamespaceWatcher:
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
                 await asyncio.sleep(5)
+
+    async def handle_subenv_deployment_created(self, deployment_name: str, namespace_name: str):
+        """Handle deployment created events in monitored sub-environments."""
+        logger.info(
+            "Sub-environment deployment created: namespace=%s deployment=%s",
+            namespace_name,
+            deployment_name,
+        )
+        tasks = []
+        if self.kong_manager:
+            tasks.append(self.kong_manager.ensure_subenv_deployment_routes(deployment_name, namespace_name))
+        if self.apollo_manager:
+            tasks.append(self.apollo_manager.ensure_subenv_app_config(deployment_name, namespace_name))
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "Sub-environment deployment created task %s failed for %s/%s: %s",
+                        i,
+                        namespace_name,
+                        deployment_name,
+                        result,
+                    )
+
+    async def handle_subenv_deployment_deleted(self, deployment_name: str, namespace_name: str):
+        """Handle deployment deleted events in monitored sub-environments."""
+        logger.info(
+            "Sub-environment deployment deleted: namespace=%s deployment=%s",
+            namespace_name,
+            deployment_name,
+        )
+        if self.kong_manager:
+            try:
+                await self.kong_manager.remove_subenv_deployment_routes(deployment_name, namespace_name)
+            except Exception as e:
+                logger.error(
+                    "Failed to remove sub-environment routes for %s/%s: %s",
+                    namespace_name,
+                    deployment_name,
+                    e,
+                )
     
     
     async def shutdown(self):
@@ -508,6 +569,8 @@ class NamespaceWatcher:
         logger.info("Shutting down namespace watcher")
         self._shutdown_event.set()
         self.watcher.stop()
+        if self.subenv_monitor:
+            await self.subenv_monitor.shutdown()
         
         # Wait for all namespace tasks to complete
         if self.namespace_tasks:
@@ -521,7 +584,10 @@ class NamespaceWatcher:
         """Run the namespace watcher"""
         try:
             await self.initialize()
-            await self.watch_namespaces()
+            run_tasks = [asyncio.create_task(self.watch_namespaces())]
+            if self.subenv_monitor:
+                run_tasks.append(asyncio.create_task(self.subenv_monitor.run()))
+            await asyncio.gather(*run_tasks)
         except Exception as e:
             logger.error(f"Fatal error: {e}")
             raise

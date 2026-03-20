@@ -1,7 +1,9 @@
 """
 Apollo configuration manager
 """
-from typing import List, Dict, Optional
+import json
+import time
+from typing import List, Dict, Optional, Tuple
 import aiomysql
 
 from ..config.settings import db_config, app_config
@@ -23,6 +25,12 @@ class ApolloManager:
             'db': db_config.database
         }
         self.reference_env = app_config.reference_env
+        self._deployment_aliases = {
+            "backoffice-v1-web-app": "backoffice-v2-webapp",
+            "beep-v1-web": "beep-v1-webapp",
+            "online-purchase-svc-cronjob": "online-purchase-svc",
+        }
+        self._skip_apps = {"bo-v1-assets", "inventory-cronjob"}
     
     async def _get_connection(self):
         """Get database connection"""
@@ -204,3 +212,211 @@ class ApolloManager:
                 await cursor.close()
             if conn:
                 conn.close()
+
+    def _normalize_app_id(self, deployment_name: str) -> str:
+        app_id = self._deployment_aliases.get(deployment_name, deployment_name)
+        if app_id.startswith("backoffice-v1-web"):
+            return "backoffice-v1-web"
+        return app_id
+
+    async def ensure_subenv_app_config(self, deployment_name: str, env: str) -> bool:
+        """Ensure app configuration for a deployment exists in the target environment cluster."""
+        app_id = self._normalize_app_id(deployment_name)
+        if app_id in self._skip_apps:
+            logger.info(f"Skip Apollo sync for app {app_id}")
+            return True
+
+        conn = None
+        cursor = None
+        try:
+            conn = await self._get_connection()
+            cursor = await conn.cursor()
+            await conn.begin()
+
+            # Cluster entry for this app + env already exists: no-op
+            await cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM Cluster
+                WHERE Name=%s AND AppId=%s AND IsDeleted=0
+                """,
+                (env, app_id),
+            )
+            result = await cursor.fetchone()
+            if result and result[0] > 0:
+                await conn.rollback()
+                logger.info(f"Apollo app config already exists for app={app_id} env={env}")
+                return True
+
+            # Clone Cluster rows from reference env
+            await cursor.execute(
+                """
+                INSERT INTO Cluster
+                    (Name, AppId, ParentClusterId, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime)
+                SELECT
+                    %s, AppId, ParentClusterId, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime
+                FROM Cluster
+                WHERE Name=%s AND IsDeleted=0 AND AppId=%s
+                """,
+                (env, self.reference_env, app_id),
+            )
+            if cursor.rowcount == 0:
+                await conn.rollback()
+                logger.warning(
+                    "No template Cluster found in reference env for app=%s ref_env=%s",
+                    app_id,
+                    self.reference_env,
+                )
+                return False
+
+            # Clone Namespace rows from reference env
+            await cursor.execute(
+                """
+                INSERT INTO Namespace
+                    (AppId, ClusterName, NamespaceName, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime)
+                SELECT
+                    AppId, %s, NamespaceName, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime
+                FROM Namespace
+                WHERE ClusterName=%s AND AppId=%s
+                """,
+                (env, self.reference_env, app_id),
+            )
+
+            # Clone Items + create Release for web.<app_id>
+            cm_ok, cm_configurations = await self._clone_namespace_items(
+                cursor=cursor,
+                app_id=app_id,
+                env=env,
+                namespace_name=f"web.{app_id}",
+            )
+
+            # Clone Items + create Release for secret
+            secret_ok, secret_configurations = await self._clone_namespace_items(
+                cursor=cursor,
+                app_id=app_id,
+                env=env,
+                namespace_name="secret",
+            )
+
+            release_rows = []
+            if cm_ok:
+                release_rows.append(
+                    (
+                        f"AUTO-{int(time.time() * 1000)}-cm",
+                        "release",
+                        app_id,
+                        env,
+                        f"web.{app_id}",
+                        json.dumps(cm_configurations, ensure_ascii=False),
+                    )
+                )
+            if secret_ok:
+                release_rows.append(
+                    (
+                        f"AUTO-{int(time.time() * 1000)}-secret",
+                        "release",
+                        app_id,
+                        env,
+                        "secret",
+                        json.dumps(secret_configurations, ensure_ascii=False),
+                    )
+                )
+
+            if release_rows:
+                await cursor.executemany(
+                    """
+                    INSERT INTO `Release` (ReleaseKey, Name, AppId, ClusterName, NamespaceName, Configurations)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    release_rows,
+                )
+
+            await conn.commit()
+            logger.info(f"Apollo app config synced for app={app_id} env={env}")
+            return True
+        except Exception as e:
+            if conn:
+                await conn.rollback()
+            logger.error(f"Failed to sync Apollo app config for deployment={deployment_name} env={env}: {e}")
+            raise
+        finally:
+            if cursor:
+                await cursor.close()
+            if conn:
+                conn.close()
+
+    async def _clone_namespace_items(
+        self,
+        cursor,
+        app_id: str,
+        env: str,
+        namespace_name: str,
+    ) -> Tuple[bool, Dict[str, str]]:
+        """Clone Item rows from reference cluster namespace to target cluster namespace."""
+        await cursor.execute(
+            """
+            SELECT Id
+            FROM Namespace
+            WHERE IsDeleted=0 AND AppId=%s AND ClusterName=%s AND NamespaceName=%s
+            LIMIT 1
+            """,
+            (app_id, self.reference_env, namespace_name),
+        )
+        src = await cursor.fetchone()
+        if not src:
+            return False, {}
+        src_namespace_id = src[0]
+
+        await cursor.execute(
+            """
+            SELECT Id
+            FROM Namespace
+            WHERE IsDeleted=0 AND AppId=%s AND ClusterName=%s AND NamespaceName=%s
+            LIMIT 1
+            """,
+            (app_id, env, namespace_name),
+        )
+        dst = await cursor.fetchone()
+        if not dst:
+            return False, {}
+        dst_namespace_id = dst[0]
+
+        await cursor.execute(
+            """
+            SELECT Item.`Key`, Item.Value, Item.Comment
+            FROM Item
+            WHERE Item.NamespaceId=%s AND Item.IsDeleted=0 AND LENGTH(Item.`Key`) != 0
+            """,
+            (src_namespace_id,),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return True, {}
+
+        insert_rows = []
+        configurations: Dict[str, str] = {}
+        for key, value, comment in rows:
+            normalized_value = value
+            # Keep AWS resource references untouched, align env-specific values otherwise.
+            if isinstance(normalized_value, str):
+                if (
+                    "https://sqs.ap-southeast-1.amazonaws.com/" not in normalized_value
+                    and "arn:aws:sns:ap-southeast-1:" not in normalized_value
+                ):
+                    normalized_value = normalized_value.replace(self.reference_env.upper(), env.upper())
+                    normalized_value = normalized_value.replace(self.reference_env, env)
+
+            insert_rows.append(
+                (dst_namespace_id, key, normalized_value, comment, "namespace-watcher", "namespace-watcher")
+            )
+            configurations[key] = normalized_value
+
+        await cursor.executemany(
+            """
+            INSERT INTO Item
+                (NamespaceId, `Key`, Value, Comment, DataChange_CreatedBy, DataChange_LastModifiedBy)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            insert_rows,
+        )
+        return True, configurations

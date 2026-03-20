@@ -84,6 +84,8 @@ class AppConfig:
     enable_kong_routes: bool = os.getenv("ENABLE_KONG_ROUTES", "true").lower() == "true"
     enable_apollo_config: bool = os.getenv("ENABLE_APOLLO_CONFIG", "true").lower() == "true"
     enable_zadig_workflow: bool = os.getenv("ENABLE_ZADIG_WORKFLOW", "true").lower() == "true"
+    enable_subenv_monitor: bool = os.getenv("ENABLE_SUBENV_MONITOR", "true").lower() == "true"
+    subenv_refresh_interval_seconds: int = int(os.getenv("SUBENV_REFRESH_INTERVAL_SECONDS", "60"))
 
 
 # Global configuration instances
