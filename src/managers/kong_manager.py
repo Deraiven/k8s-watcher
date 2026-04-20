@@ -139,7 +139,7 @@ class KongManager:
                 
                 # Delete services that end with this environment
                 for service in services:
-                    service_name = service.get('name', '')
+                    service_name = service.get('name') or ''
                     if service_name.endswith(env):
                         service_id = service['id']
                         

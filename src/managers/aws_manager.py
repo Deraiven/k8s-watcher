@@ -2,6 +2,7 @@
 AWS resources manager for SQS and SNS
 """
 import json
+import re
 from typing import List, Dict, Any, Optional
 import aioboto3
 from botocore.exceptions import ClientError
@@ -32,6 +33,16 @@ class AWSManager:
                 response = await sts.get_caller_identity()
                 self.account_id = response['Account']
         return self.account_id
+
+    def _matches_env_token(self, text: str, env: str) -> bool:
+        """
+        Match environment as a standalone token (delimiter-bounded), not as prefix of another env.
+        Example: test3 should not match test33.
+        """
+        if not text:
+            return False
+        pattern = rf"(^|[^A-Za-z0-9]){re.escape(env)}([^A-Za-z0-9]|$)"
+        return re.search(pattern, text, flags=re.IGNORECASE) is not None
     
     @async_retry(max_tries=3, exceptions=(ClientError,))
     async def create_sqs_queues(self, env: str) -> List[str]:
@@ -42,8 +53,8 @@ class AWSManager:
             # First, get list of existing queues for this environment
             existing_queues = set()
             async for existing_queue in sqs.queues.all():
-                if env in existing_queue.url or env.upper() in existing_queue.url:
-                    queue_name = existing_queue.url.split("/")[-1]
+                queue_name = existing_queue.url.split("/")[-1]
+                if self._matches_env_token(queue_name, env):
                     existing_queues.add(queue_name)
             # Get all queues
             async for queue in sqs.queues.all():
@@ -113,7 +124,7 @@ class AWSManager:
             # Filter and delete queues for this environment
             for queue_url in queue_urls:
                 queue_name = queue_url.split("/")[-1]
-                if env in queue_name or env.upper() in queue_name:
+                if self._matches_env_token(queue_name, env):
                     try:
                         await sqs.delete_queue(QueueUrl=queue_url)
                         deleted_queues.append(queue_name)
