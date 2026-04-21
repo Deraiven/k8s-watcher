@@ -219,13 +219,38 @@ class ApolloManager:
             return "backoffice-v1-web"
         return app_id
 
+    def _resolve_target_app_ids(self, deployment_name: str) -> List[str]:
+        # For backoffice web app, keep both legacy and v2 app configs in sync.
+        if deployment_name == "backoffice-v1-web-app":
+            return ["backoffice-v2-webapp", "backoffice-v1-web"]
+        # For beep web app, keep both legacy and webapp configs in sync.
+        if deployment_name == "beep-v1-web":
+            return ["beep-v1-web", "beep-v1-webapp"]
+        return [self._normalize_app_id(deployment_name)]
+
     async def ensure_subenv_app_config(self, deployment_name: str, env: str) -> bool:
         """Ensure app configuration for a deployment exists in the target environment cluster."""
-        app_id = self._normalize_app_id(deployment_name)
-        if app_id in self._skip_apps:
-            logger.info(f"Skip Apollo sync for app {app_id}")
-            return True
+        target_app_ids = self._resolve_target_app_ids(deployment_name)
+        synced_count = 0
+        for app_id in target_app_ids:
+            if app_id in self._skip_apps:
+                logger.info(f"Skip Apollo sync for app {app_id}")
+                continue
+            ok = await self._sync_single_app_config(app_id, env)
+            if ok:
+                synced_count += 1
 
+        if synced_count == 0:
+            logger.warning(
+                "No Apollo app config synced for deployment=%s env=%s targets=%s",
+                deployment_name,
+                env,
+                target_app_ids,
+            )
+            return False
+        return True
+
+    async def _sync_single_app_config(self, app_id: str, env: str) -> bool:
         conn = None
         cursor = None
         try:
@@ -233,7 +258,6 @@ class ApolloManager:
             cursor = await conn.cursor()
             await conn.begin()
 
-            # Cluster entry for this app + env already exists: no-op
             await cursor.execute(
                 """
                 SELECT COUNT(*)
@@ -248,7 +272,6 @@ class ApolloManager:
                 logger.info(f"Apollo app config already exists for app={app_id} env={env}")
                 return True
 
-            # Clone Cluster rows from reference env
             await cursor.execute(
                 """
                 INSERT INTO Cluster
@@ -269,7 +292,6 @@ class ApolloManager:
                 )
                 return False
 
-            # Clone Namespace rows from reference env
             await cursor.execute(
                 """
                 INSERT INTO Namespace
@@ -282,15 +304,12 @@ class ApolloManager:
                 (env, self.reference_env, app_id),
             )
 
-            # Clone Items + create Release for web.<app_id>
             cm_ok, cm_configurations = await self._clone_namespace_items(
                 cursor=cursor,
                 app_id=app_id,
                 env=env,
                 namespace_name=f"web.{app_id}",
             )
-
-            # Clone Items + create Release for secret
             secret_ok, secret_configurations = await self._clone_namespace_items(
                 cursor=cursor,
                 app_id=app_id,
@@ -321,7 +340,6 @@ class ApolloManager:
                         json.dumps(secret_configurations, ensure_ascii=False),
                     )
                 )
-
             if release_rows:
                 await cursor.executemany(
                     """
@@ -337,7 +355,7 @@ class ApolloManager:
         except Exception as e:
             if conn:
                 await conn.rollback()
-            logger.error(f"Failed to sync Apollo app config for deployment={deployment_name} env={env}: {e}")
+            logger.error(f"Failed to sync Apollo app config for app={app_id} env={env}: {e}")
             raise
         finally:
             if cursor:
