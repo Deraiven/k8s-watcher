@@ -38,6 +38,8 @@ class SubEnvironmentMonitor:
         self._lock = asyncio.Lock()
         self.monitored_namespaces: Set[str] = set()
         self.deployment_tasks: Set[asyncio.Task] = set()
+        self._seen_deployments: Set[str] = set()
+        self._catchup_tasks: Dict[str, asyncio.Task] = {}
 
     def _is_candidate_namespace(self, namespace_name: str) -> bool:
         if namespace_name in self.excluded_namespaces:
@@ -72,6 +74,12 @@ class SubEnvironmentMonitor:
                     len(added),
                     len(removed),
                 )
+                # Reconcile already-existing deployments for newly added namespaces.
+                # This covers the gap where deployments were created before monitor started tracking.
+                for namespace_name in added:
+                    task = asyncio.create_task(self._reconcile_existing_deployments(namespace_name))
+                    self.deployment_tasks.add(task)
+                    task.add_done_callback(lambda t: self.deployment_tasks.discard(t))
             else:
                 logger.debug("Sub-env monitor unchanged: total=%s", len(next_namespaces))
         except Exception as e:
@@ -82,20 +90,44 @@ class SubEnvironmentMonitor:
         if not self._is_candidate_namespace(namespace_name):
             return
         async with self._lock:
+            is_new = namespace_name not in self.monitored_namespaces
             self.monitored_namespaces.add(namespace_name)
         logger.info(f"Added namespace to sub-env monitor: {namespace_name}")
+        if is_new:
+            await self._reconcile_existing_deployments(namespace_name)
+            # Short catch-up window: deployments may appear a few seconds after namespace ADDED.
+            await self._schedule_namespace_catchup(namespace_name)
 
     async def remove_namespace(self, namespace_name: str):
         """Remove a namespace from monitoring."""
+        catchup_task = None
         async with self._lock:
             removed = namespace_name in self.monitored_namespaces
             self.monitored_namespaces.discard(namespace_name)
+            catchup_task = self._catchup_tasks.pop(namespace_name, None)
+            namespace_prefix = f"{namespace_name}/"
+            self._seen_deployments = {key for key in self._seen_deployments if not key.startswith(namespace_prefix)}
+        if catchup_task and not catchup_task.done():
+            catchup_task.cancel()
         if removed:
             logger.info(f"Removed namespace from sub-env monitor: {namespace_name}")
 
     async def _is_monitored(self, namespace_name: str) -> bool:
         async with self._lock:
             return namespace_name in self.monitored_namespaces
+
+    async def _mark_seen_and_check_new(self, namespace_name: str, deployment_name: str) -> bool:
+        key = f"{namespace_name}/{deployment_name}"
+        async with self._lock:
+            if key in self._seen_deployments:
+                return False
+            self._seen_deployments.add(key)
+            return True
+
+    async def _clear_seen(self, namespace_name: str, deployment_name: str):
+        key = f"{namespace_name}/{deployment_name}"
+        async with self._lock:
+            self._seen_deployments.discard(key)
 
     async def _dispatch_callback(self, callback: Optional[DeploymentCallback], deployment_name: str, namespace_name: str):
         if not callback:
@@ -104,9 +136,65 @@ class SubEnvironmentMonitor:
 
     async def _handle_deployment_event(self, event_type: str, deployment_name: str, namespace_name: str):
         if event_type == "ADDED":
-            await self._dispatch_callback(self.on_created, deployment_name, namespace_name)
+            is_new = await self._mark_seen_and_check_new(namespace_name, deployment_name)
+            if is_new:
+                await self._dispatch_callback(self.on_created, deployment_name, namespace_name)
         elif event_type == "DELETED":
+            await self._clear_seen(namespace_name, deployment_name)
             await self._dispatch_callback(self.on_deleted, deployment_name, namespace_name)
+
+    async def _schedule_namespace_catchup(self, namespace_name: str):
+        async with self._lock:
+            existing = self._catchup_tasks.get(namespace_name)
+            if existing and not existing.done():
+                return
+            task = asyncio.create_task(self._namespace_catchup_loop(namespace_name))
+            self._catchup_tasks[namespace_name] = task
+            self.deployment_tasks.add(task)
+            task.add_done_callback(lambda t: self.deployment_tasks.discard(t))
+
+    async def _namespace_catchup_loop(self, namespace_name: str):
+        try:
+            # Retry a few times to capture deployments created right after namespace creation.
+            for _ in range(6):
+                if self._shutdown_event.is_set():
+                    return
+                if not await self._is_monitored(namespace_name):
+                    return
+                await self._reconcile_existing_deployments(namespace_name)
+                await asyncio.sleep(5)
+        finally:
+            async with self._lock:
+                current = self._catchup_tasks.get(namespace_name)
+                if current is asyncio.current_task():
+                    self._catchup_tasks.pop(namespace_name, None)
+
+    async def _reconcile_existing_deployments(self, namespace_name: str):
+        """Replay create callback for deployments that already exist in namespace."""
+        try:
+            deployment_list = await asyncio.to_thread(
+                self.apps_v1.list_namespaced_deployment,
+                namespace=namespace_name,
+            )
+            items = deployment_list.items or []
+            if not items:
+                return
+
+            logger.info(
+                "Reconciling existing deployments for namespace=%s count=%s",
+                namespace_name,
+                len(items),
+            )
+            for deployment in items:
+                deployment_name = deployment.metadata.name
+                await self._handle_deployment_event("ADDED", deployment_name, namespace_name)
+        except ApiException as e:
+            if e.status == 404:
+                logger.info(f"Namespace {namespace_name} not found during deployment reconcile")
+                return
+            logger.error(f"Failed to reconcile deployments for namespace {namespace_name}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected reconcile error for namespace {namespace_name}: {e}")
 
     async def _refresh_loop(self):
         """Background loop to periodically refresh monitored namespaces."""

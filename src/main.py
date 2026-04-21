@@ -486,6 +486,10 @@ class NamespaceWatcher:
                             logger.debug(f"ADDED event - should_track: {should_track}, in_stored: {in_stored}, in_processing: {in_processing}, name: {namespace.metadata.name}")
                             
                             if should_track and not in_stored and not in_processing:
+                                # Start sub-environment deployment monitoring immediately.
+                                # Do this before resource provisioning to avoid delay windows.
+                                if self.subenv_monitor:
+                                    await self.subenv_monitor.add_namespace(namespace.metadata.name)
                                 logger.info(f"Creating the namespace {namespace.metadata.name}")
                                 # Create task for parallel processing
                                 task = asyncio.create_task(self.handle_namespace_created(namespace.metadata.name))
