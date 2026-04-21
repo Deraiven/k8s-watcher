@@ -10,6 +10,7 @@ A Kubernetes controller that automatically manages infrastructure resources when
 - **Kong API Gateway**: Configures routes and uploads certificates
 - **Apollo Configuration**: Manages configuration database
 - **Zadig Workflow**: Updates workflow configurations
+- **Sub-Environment Deployment Monitor**: Watches deployment create/delete events for Zadig sub-environments
 
 ## Architecture
 
@@ -62,6 +63,8 @@ You can enable/disable specific features:
 - `ENABLE_KONG_ROUTES`: Kong route management
 - `ENABLE_APOLLO_CONFIG`: Apollo configuration
 - `ENABLE_ZADIG_WORKFLOW`: Zadig workflow updates
+- `ENABLE_SUBENV_MONITOR`: monitor deployment events in sub-environments (requires Zadig)
+- `SUBENV_REFRESH_INTERVAL_SECONDS`: refresh interval for sub-environment list from Zadig
 
 ## Security
 

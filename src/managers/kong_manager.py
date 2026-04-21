@@ -139,7 +139,7 @@ class KongManager:
                 
                 # Delete services that end with this environment
                 for service in services:
-                    service_name = service.get('name', '')
+                    service_name = service.get('name') or ''
                     if service_name.endswith(env):
                         service_id = service['id']
                         
@@ -175,3 +175,210 @@ class KongManager:
             except Exception as e:
                 logger.error(f"Failed to get service info: {e}")
                 return None
+
+    @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
+    async def ensure_subenv_deployment_routes(self, deployment_name: str, env: str) -> bool:
+        """Create deployment-specific routes for monitored sub-environments."""
+        if deployment_name not in ("backoffice-v1-web-app", "backoffice-v1-web-api"):
+            return True
+
+        async with aiohttp.ClientSession() as session:
+            headers = {"Content-Type": "application/json"}
+
+            if deployment_name == "backoffice-v1-web-app":
+                service_name = f"{deployment_name}-{env}"
+                await self._ensure_service(
+                    session,
+                    service_name=service_name,
+                    host=f"{deployment_name}.{env}",
+                    port=80,
+                    protocol="http",
+                    headers=headers,
+                )
+                await self._ensure_pre_function_plugin(session, service_name, headers)
+                await self._ensure_route(
+                    session,
+                    service_name=service_name,
+                    route_payload={
+                        "hosts": [f"*.backoffice.{env}.shub.us"],
+                        "preserve_host": True,
+                        "protocols": ["http", "https"],
+                        "https_redirect_status_code": 301,
+                        "path_handling": "v1",
+                        "strip_path": True,
+                    },
+                    headers=headers,
+                )
+
+                assets_service = f"bo-v1-assets-{env}"
+                await self._ensure_service(
+                    session,
+                    service_name=assets_service,
+                    host=f"bo-v1-assets.{env}",
+                    port=80,
+                    protocol="http",
+                    headers=headers,
+                )
+                await self._ensure_route(
+                    session,
+                    service_name=assets_service,
+                    route_payload={
+                        "hosts": [f"*.backoffice.{env}.shub.us"],
+                        "protocols": ["http", "https"],
+                        "https_redirect_status_code": 301,
+                        "preserve_host": True,
+                        "strip_path": False,
+                        "path_handling": "v1",
+                        "paths": ["/img", "/scripts", "/assets", "/css", "/ico", "/files"],
+                    },
+                    headers=headers,
+                )
+                return True
+
+            # backoffice-v1-web-api
+            service_name = f"{deployment_name}-{env}"
+            await self._ensure_service(
+                session,
+                service_name=service_name,
+                host=f"{deployment_name}.{env}",
+                port=80,
+                protocol="http",
+                headers=headers,
+            )
+            await self._ensure_route(
+                session,
+                service_name=service_name,
+                route_payload={
+                    "hosts": [f"backoffice-api.{env}.shub.us"],
+                    "preserve_host": False,
+                    "protocols": ["http", "https"],
+                    "https_redirect_status_code": 301,
+                    "path_handling": "v1",
+                    "strip_path": True,
+                },
+                headers=headers,
+            )
+            return True
+
+    @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
+    async def remove_subenv_deployment_routes(self, deployment_name: str, env: str) -> bool:
+        """Delete deployment-specific routes for monitored sub-environments."""
+        # Keep behavior aligned with demo script: only web-app deletion path.
+        if deployment_name != "backoffice-v1-web-app":
+            return True
+
+        async with aiohttp.ClientSession() as session:
+            await self._delete_service_routes_by_env(session, f"backoffice-v1-web-app-{env}", env)
+            await self._delete_service_if_exists(session, f"backoffice-v1-web-app-{env}")
+            await self._delete_service_routes_by_env(session, f"bo-v1-assets-{env}", env)
+            await self._delete_service_if_exists(session, f"bo-v1-assets-{env}")
+            return True
+
+    async def _ensure_service(
+        self,
+        session: aiohttp.ClientSession,
+        service_name: str,
+        host: str,
+        port: int,
+        protocol: str,
+        headers: Dict[str, str],
+    ):
+        async with session.get(f"{self.admin_url}/services/{service_name}") as resp:
+            if resp.status == 200:
+                return
+
+        payload = {"name": service_name, "port": port, "protocol": protocol, "host": host}
+        async with session.post(
+            f"{self.admin_url}/services",
+            headers=headers,
+            data=json.dumps(payload),
+        ) as resp:
+            if resp.status not in (201, 409):
+                error_text = await resp.text()
+                raise RuntimeError(f"Failed to create service {service_name}: {error_text}")
+
+    async def _ensure_pre_function_plugin(self, session: aiohttp.ClientSession, service_name: str, headers: Dict[str, str]):
+        async with session.get(f"{self.admin_url}/services/{service_name}/plugins") as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                for plugin in data.get("data", []):
+                    if plugin.get("name") == "pre-function":
+                        return
+
+        payload = {
+            "protocols": ["grpc", "grpcs", "http", "https"],
+            "enabled": True,
+            "config": {
+                "certificate": [],
+                "rewrite": [],
+                "access": [
+                    "local random = math.random local function uuid() local template = \"xx-x4xxxxyxxyyyyxxyx4xxxxyxxyyyyxxy-yxxxxxyxyyxyxyxx-xx\" local ans = string.gsub(template, \"[xy]\", function(c) local v = (c == \"x\") and random(0, 0xf) or random(8, 0xb) return string.format(\"%x\", v) end) return ans end kong.service.request.add_header(\"traceparent\", uuid())",
+                    "function split(s, delimiter) res = {} for match in (s .. delimiter):gmatch(\"([^.]+)\" .. delimiter) do table.insert(res, match) end if #res == 5 then return res[3] else return res[2] end end local host = kong.request.get_host() local env = split(host, \".\") kong.service.request.add_header(\"x-env\", env)",
+                ],
+                "header_filter": [],
+                "body_filter": [],
+                "log": [],
+            },
+            "name": "pre-function",
+        }
+        async with session.post(
+            f"{self.admin_url}/services/{service_name}/plugins",
+            headers=headers,
+            data=json.dumps(payload),
+        ) as resp:
+            if resp.status not in (201, 409):
+                error_text = await resp.text()
+                raise RuntimeError(f"Failed to create pre-function plugin for {service_name}: {error_text}")
+
+    async def _ensure_route(
+        self,
+        session: aiohttp.ClientSession,
+        service_name: str,
+        route_payload: Dict[str, Any],
+        headers: Dict[str, str],
+    ):
+        desired_hosts = set(route_payload.get("hosts") or [])
+        desired_paths = set(route_payload.get("paths") or [])
+
+        async with session.get(f"{self.admin_url}/services/{service_name}/routes") as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                for route in data.get("data", []):
+                    route_hosts = set(route.get("hosts") or [])
+                    route_paths = set(route.get("paths") or [])
+                    if route_hosts == desired_hosts and route_paths == desired_paths:
+                        return
+
+        async with session.post(
+            f"{self.admin_url}/services/{service_name}/routes",
+            headers=headers,
+            data=json.dumps(route_payload),
+        ) as resp:
+            if resp.status not in (201, 409):
+                error_text = await resp.text()
+                raise RuntimeError(f"Failed to create route for {service_name}: {error_text}")
+
+    async def _delete_service_routes_by_env(self, session: aiohttp.ClientSession, service_name: str, env: str):
+        async with session.get(f"{self.admin_url}/services/{service_name}/routes") as resp:
+            if resp.status != 200:
+                return
+            data = await resp.json()
+            routes = data.get("data", [])
+
+        for route in routes:
+            hosts = route.get("hosts") or []
+            if not any(env in host for host in hosts):
+                continue
+            route_id = route.get("id")
+            if not route_id:
+                continue
+            async with session.delete(f"{self.admin_url}/routes/{route_id}") as delete_resp:
+                if delete_resp.status not in (204, 404):
+                    error_text = await delete_resp.text()
+                    raise RuntimeError(f"Failed to delete route {route_id}: {error_text}")
+
+    async def _delete_service_if_exists(self, session: aiohttp.ClientSession, service_name: str):
+        async with session.delete(f"{self.admin_url}/services/{service_name}") as resp:
+            if resp.status not in (204, 404):
+                error_text = await resp.text()
+                raise RuntimeError(f"Failed to delete service {service_name}: {error_text}")
