@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: namespace-watcher
-  namespace: default
+  namespace: fat-k8s
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -11,6 +11,9 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: ["namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
   resources: ["events"]
@@ -33,4 +36,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: namespace-watcher
-  namespace: default
+  namespace: fat-k8s
