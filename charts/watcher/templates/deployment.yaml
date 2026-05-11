@@ -15,7 +15,6 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath  "/configmap.yaml") . | sha256sum }}
-        checksum/secrets: {{ include (print $.Template.BasePath  "/secrets.yaml") . | sha256sum }}
       labels:
         {{- include "watcher.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
@@ -40,8 +39,10 @@ spec:
           envFrom:
           - configMapRef:
             name: {{ .Release.Name }}-config
+          {{- with .Values.existingSecretName }}
           - secretRef:
-            name: {{ .Release.Name }}-secrets
+            name: {{ . }}
+          {{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
