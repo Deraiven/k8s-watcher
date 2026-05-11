@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  PYTHONUNBUFFERED: "1"
+  AWS_REGION: ap-southeast-1
+  CERT_MANAGER_ISSUER: letsencrypt-cloudflare
+  CERT_MANAGER_ISSUER_KIND: ClusterIssuer
+  CERT_MANAGER_NAMESPACE: cert-manager
+  ENABLE_APOLLO_CONFIG: "true"
+  ENABLE_AWS_RESOURCES: "true"
+  ENABLE_CERT_MANAGEMENT: "true"
+  ENABLE_DNS_MANAGEMENT: "true"
+  ENABLE_KONG_ROUTES: "true"
+  ENABLE_SUBENV_MONITOR: "true"
+  ENABLE_ZADIG_WORKFLOW: "true"
+  EXCLUDED_NAMESPACES: test17,test33
+  IN_CLUSTER: "true"
+  KONG_ADMIN_URL: http://kong-kong-admin.proxy:8001
+  LOG_LEVEL: INFO
+  MYSQL_DATABASE: ApolloConfigDB_fat
+  MYSQL_HOST: 192.168.0.50
+  MYSQL_PORT: "3306"
+  MYSQL_USER: apollo_user
+  NAMESPACE_LABEL_KEY: createdBy
+  NAMESPACE_LABEL_VALUE: koderover
+  NAMESPACE_PREFIX: test
+  REDIS_KEY_PREFIX: namespace-watcher
+  REDIS_TTL_DAYS: "30"
+  REDIS_URL: redis://redis-master:6379/0
+  REFERENCE_ENV: test33
+  SUBENV_REFRESH_INTERVAL_SECONDS: "60"
+  ZADIG_PROJECT_KEY: fat
+  ZADIG_URL: http://zadigx.shub.us
