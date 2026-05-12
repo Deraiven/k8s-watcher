@@ -63,25 +63,49 @@ class ZadigManager:
         # 1. 获取所有环境信息 (这里假设你有一个获取列表的方法)
         # envs = await self.get_environments_from_zadig() 
         # 这里用你之前提供的 JSON 列表逻辑
-        whiteList = ["test17", "test33", "test5", "test50", "test66"]
+        whiteList = ["test17", "test33", "test5", "test50"]
         envList = await self.get_environments()
+        if not envList:
+            logger.warning("环境清理巡检结束：未获取到环境列表")
+            return
         expiry_threshold = int(time.time()) - (15 * 24 * 60 * 60)
+        logger.info(
+            "环境清理阈值: %s (15天前)",
+            datetime.datetime.fromtimestamp(expiry_threshold).strftime('%Y-%m-%d %H:%M:%S')
+        )
+        total_count = len(envList)
+        expired_candidates = 0
+        deleted_count = 0
         
         for env in envList:
             env_name = env.get('env_key') # 根据实际字段取值
-            update_time = env.get('update_time', 0)
+            raw_update_time = env.get('update_time', 0)
             is_production = env.get('production', False)
             status = env.get("status") 
+            if not env_name:
+                continue
+
+            # Zadig 返回的 update_time 可能是毫秒级时间戳，统一转换到秒。
+            update_time = int(raw_update_time or 0)
+            if update_time > 10**12:
+                update_time = update_time // 1000
 
             # 3. 过滤逻辑：非生产环境 且 超过15天未更新
             if not is_production and update_time < expiry_threshold and status != "sleeping" and env_name not in whiteList:
+                expired_candidates += 1
                 last_date = datetime.datetime.fromtimestamp(update_time).strftime('%Y-%m-%d')
                 logger.info(f"🚩 检测到过期环境: {env_name} (最后更新时间: {last_date})")
 
                 # 第二步：如果工作流更新成功（或容错），执行物理删除环境
-                await self._clear_environment(env_name)
+                if await self._clear_environment(env_name):
+                    deleted_count += 1
         
-        logger.info("环境清理巡检完成。")
+        logger.info(
+            "环境清理巡检完成。总数=%s, 过期候选=%s, 实际删除=%s",
+            total_count,
+            expired_candidates,
+            deleted_count,
+        )
     
     @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
     async def _clear_environment(self, env):
