@@ -51,6 +51,7 @@ Thumbs.db
 *.pem
 *.crt
 *.key
+k8s/secret.yaml
 
 # Testing
 .coverage
