@@ -7,6 +7,9 @@ import aiohttp
 import asyncio
 import time
 import datetime
+import re
+from kubernetes import client
+from kubernetes.client.rest import ApiException
 from ..config.settings import zadig_config, app_config
 from ..utils.logger import setup_logger
 from ..utils.retry import async_retry
@@ -27,6 +30,7 @@ class ZadigManager:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
+        self.v1 = client.CoreV1Api()
     
     @staticmethod # 使用 classmethod 方便装饰器直接调用
     @AdvancedScheduler.daily(time_str="03:00", description="自动清理Zadig过期环境")
@@ -38,6 +42,7 @@ class ZadigManager:
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(manager.cleanup_expired_environments())
+            loop.run_until_complete(manager.cleanup_orphaned_k8s_namespaces())
         finally:
             loop.close()
 
@@ -60,52 +65,160 @@ class ZadigManager:
         """执行具体的清理逻辑"""
         logger.info("开始执行环境清理巡检...")
         
-        # 1. 获取所有环境信息 (这里假设你有一个获取列表的方法)
-        # envs = await self.get_environments_from_zadig() 
-        # 这里用你之前提供的 JSON 列表逻辑
         whiteList = ["test17", "test33", "test5", "test50"]
         envList = await self.get_environments()
         if not envList:
             logger.warning("环境清理巡检结束：未获取到环境列表")
             return
-        expiry_threshold = int(time.time()) - (15 * 24 * 60 * 60)
+        now = int(time.time())
+        expiry_threshold = now - (7 * 24 * 60 * 60)
         logger.info(
-            "环境清理阈值: %s (15天前)",
+            "环境清理阈值: %s (7天前)",
             datetime.datetime.fromtimestamp(expiry_threshold).strftime('%Y-%m-%d %H:%M:%S')
         )
         total_count = len(envList)
-        expired_candidates = 0
+        sleep_candidates = 0
+        slept_count = 0
+        delete_candidates = 0
         deleted_count = 0
         
         for env in envList:
             env_name = env.get('env_key') # 根据实际字段取值
+            namespace_name = env.get('namespace') or env_name
             raw_update_time = env.get('update_time', 0)
             is_production = env.get('production', False)
             status = env.get("status") 
             if not env_name:
                 continue
+            if not self._is_managed_test_namespace(namespace_name):
+                logger.debug(f"跳过非托管测试环境: {env_name} (namespace={namespace_name})")
+                continue
+            if env_name in whiteList:
+                logger.debug(f"跳过白名单环境: {env_name}")
+                continue
+            if is_production:
+                logger.debug(f"跳过生产环境: {env_name}")
+                continue
 
             # Zadig 返回的 update_time 可能是毫秒级时间戳，统一转换到秒。
-            update_time = int(raw_update_time or 0)
-            if update_time > 10**12:
-                update_time = update_time // 1000
+            update_time = self._normalize_timestamp(raw_update_time)
 
-            # 3. 过滤逻辑：非生产环境 且 超过15天未更新
-            if not is_production and update_time < expiry_threshold and status != "sleeping" and env_name not in whiteList:
-                expired_candidates += 1
-                last_date = datetime.datetime.fromtimestamp(update_time).strftime('%Y-%m-%d')
-                logger.info(f"🚩 检测到过期环境: {env_name} (最后更新时间: {last_date})")
+            if status == "sleeping":
+                if update_time and update_time < expiry_threshold:
+                    delete_candidates += 1
+                    last_date = datetime.datetime.fromtimestamp(update_time).strftime('%Y-%m-%d')
+                    logger.info(f"检测到睡眠超过7天环境: {env_name} (睡眠/更新时间: {last_date})")
+                    if await self._clear_environment(env_name):
+                        deleted_count += 1
+                continue
 
-                # 第二步：如果工作流更新成功（或容错），执行物理删除环境
-                if await self._clear_environment(env_name):
-                    deleted_count += 1
+            namespace_created_at = await self._get_namespace_created_timestamp(namespace_name)
+            if namespace_created_at and namespace_created_at < expiry_threshold:
+                sleep_candidates += 1
+                created_date = datetime.datetime.fromtimestamp(namespace_created_at).strftime('%Y-%m-%d')
+                logger.info(f"检测到创建超过7天环境: {env_name} (namespace={namespace_name}, 创建时间: {created_date})")
+                if await self._set_environment_sleep(env_name, "enable"):
+                    slept_count += 1
         
         logger.info(
-            "环境清理巡检完成。总数=%s, 过期候选=%s, 实际删除=%s",
+            "环境清理巡检完成。总数=%s, 睡眠候选=%s, 实际睡眠=%s, 删除候选=%s, 实际删除=%s",
             total_count,
-            expired_candidates,
+            sleep_candidates,
+            slept_count,
+            delete_candidates,
             deleted_count,
         )
+
+    async def cleanup_orphaned_k8s_namespaces(self):
+        """删除集群中存在但 Zadig fat 项目不存在的托管测试 namespace。"""
+        logger.info("开始执行孤儿 namespace 清理巡检...")
+        env_list = await self.get_environments()
+        if env_list is None:
+            logger.warning("孤儿 namespace 清理结束：未获取到 Zadig 环境列表")
+            return
+
+        zadig_namespaces = {
+            env.get("namespace") or env.get("env_key")
+            for env in env_list
+            if env.get("namespace") or env.get("env_key")
+        }
+
+        deleted_count = 0
+        skipped_count = 0
+        namespaces = await asyncio.to_thread(self.v1.list_namespace)
+        for namespace in namespaces.items:
+            namespace_name = namespace.metadata.name
+            labels = namespace.metadata.labels or {}
+
+            if not self._is_managed_test_namespace(namespace_name):
+                continue
+            if labels.get(app_config.namespace_label_key) != app_config.namespace_label_value:
+                skipped_count += 1
+                logger.debug(f"跳过非 koderover 创建 namespace: {namespace_name}")
+                continue
+            if namespace_name in zadig_namespaces:
+                continue
+
+            logger.info(f"检测到孤儿 namespace: {namespace_name}，Zadig 项目 {self.project_key} 中不存在，准备删除")
+            if await self._delete_k8s_namespace(namespace_name):
+                deleted_count += 1
+
+        logger.info(
+            "孤儿 namespace 清理巡检完成。Zadig环境数=%s, 跳过=%s, 实际删除=%s",
+            len(zadig_namespaces),
+            skipped_count,
+            deleted_count,
+        )
+
+    def _normalize_timestamp(self, value) -> int:
+        try:
+            timestamp = int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        if timestamp > 10**12:
+            timestamp = timestamp // 1000
+        return timestamp
+
+    def _is_managed_test_namespace(self, namespace_name: str) -> bool:
+        return bool(re.fullmatch(r"test\d+", namespace_name or ""))
+
+    async def _get_namespace_created_timestamp(self, namespace_name: str) -> int:
+        try:
+            namespace = await asyncio.to_thread(
+                self.v1.read_namespace,
+                name=namespace_name,
+            )
+            creation_time = namespace.metadata.creation_timestamp
+            if not creation_time:
+                return 0
+            return int(creation_time.timestamp())
+        except ApiException as e:
+            if e.status == 404:
+                logger.info(f"namespace {namespace_name} 不存在，跳过睡眠判断")
+                return 0
+            logger.error(f"查询 namespace {namespace_name} 创建时间失败: {e}")
+            return 0
+        except Exception as e:
+            logger.error(f"查询 namespace {namespace_name} 创建时间异常: {e}")
+            return 0
+
+    async def _delete_k8s_namespace(self, namespace_name: str) -> bool:
+        try:
+            await asyncio.to_thread(
+                self.v1.delete_namespace,
+                name=namespace_name,
+            )
+            logger.info(f"删除孤儿 namespace {namespace_name} 成功")
+            return True
+        except ApiException as e:
+            if e.status == 404:
+                logger.info(f"namespace {namespace_name} 已不存在，跳过删除")
+                return True
+            logger.error(f"删除 namespace {namespace_name} 失败: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"删除 namespace {namespace_name} 异常: {e}")
+            return False
     
     @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
     async def _clear_environment(self, env):
@@ -120,6 +233,23 @@ class ZadigManager:
                     return False
             except Exception as e:
                 logger.error(f"删除环境异常: {e}")
+                raise
+
+    @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
+    async def _set_environment_sleep(self, env: str, action: str) -> bool:
+        """Set environment sleep status. action=enable sleeps, action=disable wakes."""
+        url = f"{self.base_url}/api/aslan/environment/environments/{env}/sleep?projectName={self.project_key}&action={action}"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, headers=self.headers) as resp:
+                    if resp.status < 300:
+                        logger.info(f"设置环境{env} sleep action={action} 成功: {resp.status}")
+                        return True
+                    error_text = await resp.text()
+                    logger.error(f"设置环境{env} sleep action={action} 失败: {resp.status}, {error_text}")
+                    return False
+            except Exception as e:
+                logger.error(f"设置环境 sleep 状态异常: {e}")
                 raise
 
     @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
