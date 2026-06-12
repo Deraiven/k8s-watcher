@@ -7,6 +7,7 @@ from typing import Awaitable, Callable, Dict, Optional, Set
 from kubernetes import client, watch
 from kubernetes.client.rest import ApiException
 
+from ..config.settings import app_config
 from ..utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -222,7 +223,7 @@ class SubEnvironmentMonitor:
                         deployment_watch = watch.Watch()
                         for event in deployment_watch.stream(
                             self.apps_v1.list_deployment_for_all_namespaces,
-                            timeout_seconds=300,
+                            timeout_seconds=app_config.watch_stream_timeout_seconds,
                         ):
                             future = asyncio.run_coroutine_threadsafe(
                                 event_queue.put(event),
