@@ -5,9 +5,15 @@ import threading
 import datetime
 import functools
 import inspect
+import os
 from typing import Callable, List, Dict, Any, Optional, Union
 from enum import Enum
 import re
+
+SCHEDULER_TZ = os.getenv("SCHEDULER_TZ", "CST-8")
+os.environ.setdefault("TZ", SCHEDULER_TZ)
+if hasattr(time, "tzset"):
+    time.tzset()
 
 class ScheduleType(Enum):
     """定时任务类型"""
