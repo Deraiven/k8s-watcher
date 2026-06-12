@@ -434,7 +434,7 @@ class NamespaceWatcher:
                     try:
                         w = watch.Watch()
                         # Use timeout to prevent indefinite blocking
-                        for event in w.stream(self.v1.list_namespace, timeout_seconds=300):  # 5 minutes timeout
+                        for event in w.stream(self.v1.list_namespace, timeout_seconds=app_config.watch_stream_timeout_seconds):
                             # Put event in queue
                             future = asyncio.run_coroutine_threadsafe(
                                 event_queue.put(event),
