@@ -36,79 +36,121 @@ class AWSManager:
 
     def _matches_env_token(self, text: str, env: str) -> bool:
         """
-        Match environment as a standalone token (delimiter-bounded), not as prefix of another env.
-        Example: test3 should not match test33.
+        Match environment as a standalone token split by non-alnum delimiters.
+        Example: test1 must not match test10/test12.
         """
         if not text:
             return False
-        pattern = rf"(^|[^A-Za-z0-9]){re.escape(env)}([^A-Za-z0-9]|$)"
-        return re.search(pattern, text, flags=re.IGNORECASE) is not None
+        env_token = (env or "").strip().lower()
+        if not env_token:
+            return False
+        tokens = [tok for tok in re.split(r"[^A-Za-z0-9]+", text.lower()) if tok]
+        return env_token in tokens
+
+    async def _list_queue_urls(self, sqs) -> List[str]:
+        """List all SQS queue URLs with explicit pagination."""
+        queue_urls = []
+        next_token = None
+        while True:
+            params = {"MaxResults": 1000}
+            if next_token:
+                params["NextToken"] = next_token
+            response = await sqs.list_queues(**params)
+            queue_urls.extend(response.get("QueueUrls", []))
+            next_token = response.get("NextToken")
+            if not next_token:
+                break
+        return queue_urls
+
+    def _build_queue_attributes(self, attributes: Dict[str, Any], env: str) -> Dict[str, str]:
+        """Copy queue attributes accepted by CreateQueue."""
+        copy_keys = [
+            "DelaySeconds",
+            "MaximumMessageSize",
+            "MessageRetentionPeriod",
+            "Policy",
+            "ReceiveMessageWaitTimeSeconds",
+            "RedriveAllowPolicy",
+            "RedrivePolicy",
+            "VisibilityTimeout",
+            "KmsMasterKeyId",
+            "KmsDataKeyReusePeriodSeconds",
+            "SqsManagedSseEnabled",
+            "FifoQueue",
+            "ContentBasedDeduplication",
+            "DeduplicationScope",
+            "FifoThroughputLimit",
+        ]
+        new_attributes = {}
+        for key in copy_keys:
+            value = attributes.get(key)
+            if value is None:
+                continue
+            if key in ("Policy", "RedrivePolicy", "RedriveAllowPolicy"):
+                value = value.replace(self.reference_env.upper(), env.upper()).replace(self.reference_env, env)
+            new_attributes[key] = value
+        return new_attributes
     
     @async_retry(max_tries=3, exceptions=(ClientError,))
     async def create_sqs_queues(self, env: str) -> List[str]:
         """Create SQS queues based on reference environment"""
         created_queues = []
-        
-        async with self.session.resource('sqs') as sqs:
-            # First, get list of existing queues for this environment
-            existing_queues = set()
-            async for existing_queue in sqs.queues.all():
-                queue_name = existing_queue.url.split("/")[-1]
-                if self._matches_env_token(queue_name, env):
-                    existing_queues.add(queue_name)
-            # Get all queues
-            async for queue in sqs.queues.all():
-                if self.reference_env in queue.url or self.reference_env.upper() in queue.url:
+
+        async with self.session.client('sqs') as sqs:
+            queue_urls = await self._list_queue_urls(sqs)
+            existing_queues = {
+                queue_url.split("/")[-1]
+                for queue_url in queue_urls
+                if self._matches_env_token(queue_url.split("/")[-1], env)
+            }
+            reference_queue_urls = [
+                queue_url for queue_url in queue_urls
+                if self._matches_env_token(queue_url.split("/")[-1], self.reference_env)
+            ]
+            logger.info(
+                "Found %s reference SQS queues for %s when creating %s",
+                len(reference_queue_urls),
+                self.reference_env,
+                env,
+            )
+
+            for queue_url in reference_queue_urls:
+                source_queue_name = queue_url.split("/")[-1]
+                try:
+                    attrs_response = await sqs.get_queue_attributes(
+                        QueueUrl=queue_url,
+                        AttributeNames=["All"],
+                    )
+                    attributes = attrs_response.get("Attributes", {})
+                    new_attributes = self._build_queue_attributes(attributes, env)
+                    queue_name = source_queue_name.replace(
+                        self.reference_env.upper(), env.upper()
+                    ).replace(self.reference_env, env)
+
+                    if queue_name in existing_queues:
+                        logger.info(f"Queue already exists: {queue_name}, skipping")
+                        created_queues.append(queue_name)
+                        continue
+
                     try:
-                        # Get queue attributes
-                        attributes = await queue.attributes
-                        
-                        # Prepare new queue attributes
-                        new_attributes = {}
-                        if attributes.get("FifoQueue"):
-                            new_attributes["FifoQueue"] = attributes["FifoQueue"]
-                            new_attributes["FifoThroughputLimit"] = attributes.get("FifoThroughputLimit", "perQueue")
-                            new_attributes["ContentBasedDeduplication"] = attributes.get("ContentBasedDeduplication", "false")
-                            new_attributes["DeduplicationScope"] = attributes.get("DeduplicationScope", "queue")
-                        
-                        # Update policy if exists
-                        if "Policy" in attributes:
-                            new_attributes["Policy"] = attributes["Policy"].replace(
-                                self.reference_env.upper(), env.upper()
-                            ).replace(self.reference_env, env)
-                        
-                        # Create new queue name
-                        queue_name = queue.url.split("/")[-1].replace(
-                            self.reference_env.upper(), env.upper()
-                        ).replace(self.reference_env, env)
-                        
-                        # Check if queue already exists
-                        if queue_name in existing_queues:
+                        await sqs.create_queue(
+                            QueueName=queue_name,
+                            Attributes=new_attributes,
+                        )
+                        created_queues.append(queue_name)
+                        logger.info(f"Created SQS queue: {queue_name}")
+                    except ClientError as e:
+                        if e.response['Error']['Code'] == 'QueueAlreadyExists':
                             logger.info(f"Queue already exists: {queue_name}, skipping")
                             created_queues.append(queue_name)
-                            continue
-                        
-                        try:
-                            # Create the queue
-                            await sqs.create_queue(
-                                QueueName=queue_name,
-                                Attributes=new_attributes
-                            )
-                            created_queues.append(queue_name)
-                            logger.info(f"Created SQS queue: {queue_name}")
-                            
-                        except ClientError as e:
-                            if e.response['Error']['Code'] == 'QueueAlreadyExists':
-                                logger.info(f"Queue already exists: {queue_name}, skipping")
-                                created_queues.append(queue_name)  # Still track it as handled
-                            else:
-                                logger.error(f"Failed to create queue: {e}")
-                                raise
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to process queue {queue.url}: {e}")
-                        raise
-        
+                        else:
+                            logger.error(f"Failed to create queue {queue_name}: {e}")
+                            raise
+
+                except Exception as e:
+                    logger.error(f"Failed to process queue {source_queue_name}: {e}")
+                    raise
+
         return created_queues
     
     @async_retry(max_tries=3, exceptions=(ClientError,))
