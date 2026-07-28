@@ -21,4 +21,7 @@ rules:
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["networking.istio.io"]
+    resources: ["sidecars"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 {{- end }}

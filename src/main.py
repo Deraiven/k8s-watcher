@@ -14,6 +14,7 @@ from .managers.dns_manager import CloudflareDNSManager
 from .managers.cert_manager import CertificateManager
 from .managers.apollo_manager import ApolloManager
 from .managers.kong_manager import KongManager
+from .managers.istio_sidecar_manager import IstioSidecarManager
 from .managers.zadig_manager import ZadigManager
 from .managers.redis_state_manager import RedisStateManager
 from .managers.subenv_monitor import SubEnvironmentMonitor
@@ -46,6 +47,7 @@ class NamespaceWatcher:
         self.cert_manager = CertificateManager() if app_config.enable_cert_management else None
         self.apollo_manager = ApolloManager() if app_config.enable_apollo_config else None
         self.kong_manager = KongManager() if app_config.enable_kong_routes else None
+        self.istio_sidecar_manager = IstioSidecarManager() if app_config.enable_istio_sidecar_scope else None
         self.zadig_manager = ZadigManager() if app_config.enable_zadig_workflow else None
         self.state_manager = RedisStateManager()
         self.subenv_monitor = None
@@ -114,6 +116,10 @@ class NamespaceWatcher:
             
             logger.info(f"Initialized with namespaces [{' '.join(self.stored_namespaces)}]")
             logger.info(f"Initialized with {len(self.stored_namespaces)} existing namespaces")
+
+            # Ensure existing namespaces have Sidecar scope even when Redis state is fresh.
+            if self.istio_sidecar_manager and k8s_namespaces:
+                await self.istio_sidecar_manager.reconcile_sidecar_scopes(sorted(k8s_namespaces))
             
             # Reconcile namespaces that need it
             if namespaces_to_reconcile:
@@ -207,6 +213,10 @@ class NamespaceWatcher:
         # Create Kong routes
         if self.kong_manager:
             parallel_tasks.append(asyncio.create_task(self.kong_manager.create_routes(namespace_name)))
+
+        # Limit Istio config scope for this namespace
+        if self.istio_sidecar_manager:
+            parallel_tasks.append(asyncio.create_task(self.istio_sidecar_manager.ensure_sidecar_scope(namespace_name)))
         
         # Update Zadig workflows
         if self.zadig_manager:
@@ -307,6 +317,13 @@ class NamespaceWatcher:
             parallel_tasks.append(task)
             if namespace_name in self.creation_tasks:
                 self.creation_tasks[namespace_name].append(task)
+
+        # Limit Istio config scope for this namespace
+        if self.istio_sidecar_manager:
+            task = asyncio.create_task(self.istio_sidecar_manager.ensure_sidecar_scope(namespace_name))
+            parallel_tasks.append(task)
+            if namespace_name in self.creation_tasks:
+                self.creation_tasks[namespace_name].append(task)
         
         # Update Zadig workflows
         if self.zadig_manager:
@@ -392,6 +409,10 @@ class NamespaceWatcher:
         # Delete Kong routes
         if self.kong_manager:
             parallel_tasks.append(self.kong_manager.delete_routes(namespace_name))
+
+        # Delete Istio Sidecar scope
+        if self.istio_sidecar_manager:
+            parallel_tasks.append(self.istio_sidecar_manager.delete_sidecar_scope(namespace_name))
         
         # Update Zadig workflows
         if self.zadig_manager:
