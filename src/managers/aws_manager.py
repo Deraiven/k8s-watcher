@@ -3,6 +3,7 @@ AWS resources manager for SQS and SNS
 """
 import json
 import re
+import asyncio
 from typing import List, Dict, Any, Optional
 import aioboto3
 from botocore.exceptions import ClientError
@@ -61,6 +62,38 @@ class AWSManager:
             if not next_token:
                 break
         return queue_urls
+
+    async def _list_subscriptions_by_topic(self, sns, topic_arn: str) -> List[Dict[str, Any]]:
+        """List all subscriptions for a topic with pagination and throttling backoff."""
+        subscriptions = []
+        next_token = None
+        while True:
+            params = {"TopicArn": topic_arn}
+            if next_token:
+                params["NextToken"] = next_token
+            response = await self._call_with_throttle_backoff(
+                sns.list_subscriptions_by_topic,
+                **params,
+            )
+            subscriptions.extend(response.get("Subscriptions", []))
+            next_token = response.get("NextToken")
+            if not next_token:
+                break
+        return subscriptions
+
+    async def _call_with_throttle_backoff(self, operation, **kwargs):
+        for attempt in range(5):
+            try:
+                return await operation(**kwargs)
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code not in ("Throttling", "ThrottlingException", "TooManyRequestsException"):
+                    raise
+                if attempt == 4:
+                    raise
+                delay = min(2 ** attempt, 8)
+                logger.warning(f"AWS API throttled, retrying in {delay}s: {operation.__name__}")
+                await asyncio.sleep(delay)
 
     def _build_queue_attributes(self, attributes: Dict[str, Any], env: str) -> Dict[str, str]:
         """Copy queue attributes accepted by CreateQueue."""
@@ -195,13 +228,16 @@ class AWSManager:
             reference_topic_arn = f"arn:aws:sns:{aws_config.region}:{account_id}:notification_{self.reference_env}"
             
             try:
-                # Get subscriptions from reference topic
-                response = await sns.list_subscriptions_by_topic(
-                    TopicArn=reference_topic_arn
-                )
+                reference_subscriptions = await self._list_subscriptions_by_topic(sns, reference_topic_arn)
+                existing_subscriptions = await self._list_subscriptions_by_topic(sns, topic_arn)
+                existing_by_endpoint = {
+                    sub['Endpoint']: sub['SubscriptionArn']
+                    for sub in existing_subscriptions
+                    if sub.get('Endpoint') and sub.get('SubscriptionArn')
+                }
                 
                 subscriptions = []
-                for sub in response['Subscriptions']:
+                for sub in reference_subscriptions:
                     if sub['Protocol'] == 'sqs':
                         # Update endpoint for new environment
                         new_endpoint = sub['Endpoint'].replace(
@@ -215,20 +251,13 @@ class AWSManager:
                         filter_policy = attrs_response['Attributes'].get('FilterPolicy', '{}')
                         
                         try:
-                            # Check if subscription already exists
-                            existing_subs = await sns.list_subscriptions_by_topic(TopicArn=topic_arn)
-                            existing_endpoints = [s['Endpoint'] for s in existing_subs.get('Subscriptions', [])]
-                            
-                            if new_endpoint in existing_endpoints:
+                            if new_endpoint in existing_by_endpoint:
                                 logger.info(f"Subscription already exists for endpoint: {new_endpoint}, skipping")
-                                # Find the existing subscription ARN
-                                for existing_sub in existing_subs['Subscriptions']:
-                                    if existing_sub['Endpoint'] == new_endpoint:
-                                        subscriptions.append(existing_sub['SubscriptionArn'])
-                                        break
+                                subscriptions.append(existing_by_endpoint[new_endpoint])
                             else:
                                 # Create new subscription
-                                sub_response = await sns.subscribe(
+                                sub_response = await self._call_with_throttle_backoff(
+                                    sns.subscribe,
                                     TopicArn=topic_arn,
                                     Protocol=sub['Protocol'],
                                     Endpoint=new_endpoint,
@@ -238,6 +267,7 @@ class AWSManager:
                                     ReturnSubscriptionArn=True
                                 )
                                 subscriptions.append(sub_response['SubscriptionArn'])
+                                existing_by_endpoint[new_endpoint] = sub_response['SubscriptionArn']
                                 logger.info(f"Created SNS subscription: {new_endpoint}")
                                 
                         except ClientError as e:
