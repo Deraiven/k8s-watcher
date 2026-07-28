@@ -85,6 +85,7 @@ class AppConfig:
     enable_apollo_config: bool = os.getenv("ENABLE_APOLLO_CONFIG", "true").lower() == "true"
     enable_zadig_workflow: bool = os.getenv("ENABLE_ZADIG_WORKFLOW", "true").lower() == "true"
     enable_subenv_monitor: bool = os.getenv("ENABLE_SUBENV_MONITOR", "true").lower() == "true"
+    enable_istio_sidecar_scope: bool = os.getenv("ENABLE_ISTIO_SIDECAR_SCOPE", "true").lower() == "true"
     subenv_refresh_interval_seconds: int = int(os.getenv("SUBENV_REFRESH_INTERVAL_SECONDS", "60"))
     watch_stream_timeout_seconds: int = int(os.getenv("WATCH_STREAM_TIMEOUT_SECONDS", "600"))
 
