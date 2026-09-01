@@ -299,7 +299,7 @@ class ApolloManager:
                 SELECT
                     AppId, %s, NamespaceName, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime
                 FROM Namespace
-                WHERE ClusterName=%s AND AppId=%s
+                WHERE ClusterName=%s AND AppId=%s AND NamespaceName != 'secret'
                 """,
                 (env, self.reference_env, app_id),
             )
@@ -309,12 +309,6 @@ class ApolloManager:
                 app_id=app_id,
                 env=env,
                 namespace_name=f"web.{app_id}",
-            )
-            secret_ok, secret_configurations = await self._clone_namespace_items(
-                cursor=cursor,
-                app_id=app_id,
-                env=env,
-                namespace_name="secret",
             )
 
             release_rows = []
@@ -327,17 +321,6 @@ class ApolloManager:
                         env,
                         f"web.{app_id}",
                         json.dumps(cm_configurations, ensure_ascii=False),
-                    )
-                )
-            if secret_ok:
-                release_rows.append(
-                    (
-                        f"AUTO-{int(time.time() * 1000)}-secret",
-                        "release",
-                        app_id,
-                        env,
-                        "secret",
-                        json.dumps(secret_configurations, ensure_ascii=False),
                     )
                 )
             if release_rows:
