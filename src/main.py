@@ -217,6 +217,10 @@ class NamespaceWatcher:
         # Limit Istio config scope for this namespace
         if self.istio_sidecar_manager:
             parallel_tasks.append(asyncio.create_task(self.istio_sidecar_manager.ensure_sidecar_scope(namespace_name)))
+
+        # Create Apollo clusters for the namespace before per-deployment app config sync.
+        if self.apollo_manager:
+            parallel_tasks.append(asyncio.create_task(self.apollo_manager.create_cluster_config(namespace_name)))
         
         # Update Zadig workflows
         if self.zadig_manager:
@@ -321,6 +325,13 @@ class NamespaceWatcher:
         # Limit Istio config scope for this namespace
         if self.istio_sidecar_manager:
             task = asyncio.create_task(self.istio_sidecar_manager.ensure_sidecar_scope(namespace_name))
+            parallel_tasks.append(task)
+            if namespace_name in self.creation_tasks:
+                self.creation_tasks[namespace_name].append(task)
+
+        # Create Apollo clusters for the namespace before per-deployment app config sync.
+        if self.apollo_manager:
+            task = asyncio.create_task(self.apollo_manager.create_cluster_config(namespace_name))
             parallel_tasks.append(task)
             if namespace_name in self.creation_tasks:
                 self.creation_tasks[namespace_name].append(task)

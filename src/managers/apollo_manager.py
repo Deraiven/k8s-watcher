@@ -46,27 +46,23 @@ class ApolloManager:
             conn = await self._get_connection()
             cursor = await conn.cursor()
             
-            # Check if cluster already exists
-            await cursor.execute(
-                "SELECT COUNT(*) FROM Cluster WHERE Name = %s",
-                (env,)
-            )
-            result = await cursor.fetchone()
-            
-            if result[0] > 0:
-                logger.warning(f"Apollo cluster {env} already exists")
-                return True
-            
             # Begin transaction
             await conn.begin()
             
-            # 1. Copy cluster
+            # 1. Copy missing clusters. A deployment event may have already created
+            # one app cluster, so do not skip the whole environment on partial state.
             await cursor.execute("""
                 INSERT INTO Cluster (Name, AppId, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime)
-                SELECT %s, AppId, IsDeleted, 'namespace-watcher', NOW()
-                FROM Cluster
-                WHERE Name = %s
-            """, (env, self.reference_env))
+                SELECT %s, src.AppId, src.IsDeleted, 'namespace-watcher', NOW()
+                FROM Cluster src
+                WHERE src.Name = %s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM Cluster dst
+                      WHERE dst.Name = %s AND dst.AppId = src.AppId
+                  )
+            """, (env, self.reference_env, env))
+            created_count = cursor.rowcount
             
             # 2. Copy namespaces
             # await cursor.execute("""
@@ -116,7 +112,7 @@ class ApolloManager:
             # Commit transaction
             await conn.commit()
             
-            logger.info(f"Successfully created Apollo configuration for {env}")
+            logger.info(f"Successfully created Apollo configuration for {env}, clusters_created={created_count}")
             return True
             
         except Exception as e:
