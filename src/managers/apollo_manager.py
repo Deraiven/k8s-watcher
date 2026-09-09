@@ -256,6 +256,24 @@ class ApolloManager:
 
             await cursor.execute(
                 """
+                INSERT INTO Cluster
+                    (Name, AppId, ParentClusterId, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime)
+                SELECT
+                    %s, src.AppId, src.ParentClusterId, src.IsDeleted, src.DataChange_CreatedBy, src.DataChange_CreatedTime, src.DataChange_LastModifiedBy, src.DataChange_LastTime
+                FROM Cluster src
+                WHERE src.Name=%s AND src.IsDeleted=0 AND src.AppId=%s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM Cluster dst
+                      WHERE dst.Name=%s AND dst.AppId=src.AppId AND dst.IsDeleted=0
+                  )
+                """,
+                (env, self.reference_env, app_id, env),
+            )
+            cluster_created = cursor.rowcount
+
+            await cursor.execute(
+                """
                 SELECT COUNT(*)
                 FROM Cluster
                 WHERE Name=%s AND AppId=%s AND IsDeleted=0
@@ -263,27 +281,12 @@ class ApolloManager:
                 (env, app_id),
             )
             result = await cursor.fetchone()
-            if result and result[0] > 0:
-                await conn.rollback()
-                logger.info(f"Apollo app config already exists for app={app_id} env={env}")
-                return True
-
-            await cursor.execute(
-                """
-                INSERT INTO Cluster
-                    (Name, AppId, ParentClusterId, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime)
-                SELECT
-                    %s, AppId, ParentClusterId, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime
-                FROM Cluster
-                WHERE Name=%s AND IsDeleted=0 AND AppId=%s
-                """,
-                (env, self.reference_env, app_id),
-            )
-            if cursor.rowcount == 0:
+            if not result or result[0] == 0:
                 await conn.rollback()
                 logger.warning(
-                    "No template Cluster found in reference env for app=%s ref_env=%s",
+                    "No Apollo cluster available for app=%s env=%s ref_env=%s",
                     app_id,
+                    env,
                     self.reference_env,
                 )
                 return False
@@ -293,12 +296,21 @@ class ApolloManager:
                 INSERT INTO Namespace
                     (AppId, ClusterName, NamespaceName, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime)
                 SELECT
-                    AppId, %s, NamespaceName, IsDeleted, DataChange_CreatedBy, DataChange_CreatedTime, DataChange_LastModifiedBy, DataChange_LastTime
-                FROM Namespace
-                WHERE ClusterName=%s AND AppId=%s AND NamespaceName != 'secret'
+                    src.AppId, %s, src.NamespaceName, src.IsDeleted, src.DataChange_CreatedBy, src.DataChange_CreatedTime, src.DataChange_LastModifiedBy, src.DataChange_LastTime
+                FROM Namespace src
+                WHERE src.ClusterName=%s AND src.AppId=%s AND src.NamespaceName != 'secret'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM Namespace dst
+                      WHERE dst.AppId=src.AppId
+                        AND dst.ClusterName=%s
+                        AND dst.NamespaceName=src.NamespaceName
+                        AND dst.IsDeleted=0
+                  )
                 """,
-                (env, self.reference_env, app_id),
+                (env, self.reference_env, app_id, env),
             )
+            namespace_created = cursor.rowcount
 
             cm_ok, cm_configurations = await self._clone_namespace_items(
                 cursor=cursor,
@@ -309,16 +321,27 @@ class ApolloManager:
 
             release_rows = []
             if cm_ok:
-                release_rows.append(
-                    (
-                        f"AUTO-{int(time.time() * 1000)}-cm",
-                        "release",
-                        app_id,
-                        env,
-                        f"web.{app_id}",
-                        json.dumps(cm_configurations, ensure_ascii=False),
-                    )
+                namespace_name = f"web.{app_id}"
+                await cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM `Release`
+                    WHERE AppId=%s AND ClusterName=%s AND NamespaceName=%s AND IsDeleted=0
+                    """,
+                    (app_id, env, namespace_name),
                 )
+                release_result = await cursor.fetchone()
+                if not release_result or release_result[0] == 0:
+                    release_rows.append(
+                        (
+                            f"AUTO-{int(time.time() * 1000)}-cm",
+                            "release",
+                            app_id,
+                            env,
+                            namespace_name,
+                            json.dumps(cm_configurations, ensure_ascii=False),
+                        )
+                    )
             if release_rows:
                 await cursor.executemany(
                     """
@@ -329,7 +352,14 @@ class ApolloManager:
                 )
 
             await conn.commit()
-            logger.info(f"Apollo app config synced for app={app_id} env={env}")
+            logger.info(
+                "Apollo app config synced for app=%s env=%s clusters_created=%s namespaces_created=%s releases_created=%s",
+                app_id,
+                env,
+                cluster_created,
+                namespace_created,
+                len(release_rows),
+            )
             return True
         except Exception as e:
             if conn:
@@ -390,6 +420,16 @@ class ApolloManager:
         if not rows:
             return True, {}
 
+        await cursor.execute(
+            """
+            SELECT Item.`Key`
+            FROM Item
+            WHERE Item.NamespaceId=%s AND Item.IsDeleted=0 AND LENGTH(Item.`Key`) != 0
+            """,
+            (dst_namespace_id,),
+        )
+        existing_keys = {row[0] for row in await cursor.fetchall()}
+
         insert_rows = []
         configurations: Dict[str, str] = {}
         for key, value, comment in rows:
@@ -403,17 +443,19 @@ class ApolloManager:
                     normalized_value = normalized_value.replace(self.reference_env.upper(), env.upper())
                     normalized_value = normalized_value.replace(self.reference_env, env)
 
-            insert_rows.append(
-                (dst_namespace_id, key, normalized_value, comment, "namespace-watcher", "namespace-watcher")
-            )
+            if key not in existing_keys:
+                insert_rows.append(
+                    (dst_namespace_id, key, normalized_value, comment, "namespace-watcher", "namespace-watcher")
+                )
             configurations[key] = normalized_value
 
-        await cursor.executemany(
-            """
-            INSERT INTO Item
-                (NamespaceId, `Key`, Value, Comment, DataChange_CreatedBy, DataChange_LastModifiedBy)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            insert_rows,
-        )
+        if insert_rows:
+            await cursor.executemany(
+                """
+                INSERT INTO Item
+                    (NamespaceId, `Key`, Value, Comment, DataChange_CreatedBy, DataChange_LastModifiedBy)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                insert_rows,
+            )
         return True, configurations
