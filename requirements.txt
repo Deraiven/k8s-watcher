@@ -9,8 +9,6 @@ aiosignal==1.4.0
 asyncssh==2.21.0
 attrs==25.3.0
 backoff==2.2.1
-boto3==1.39.11
-botocore==1.39.11
 cachetools==5.5.2
 certifi==2025.8.3
 cffi==2.0.0

@@ -19,11 +19,9 @@ class AWSManager:
     """Manager for AWS SQS and SNS resources"""
     
     def __init__(self):
-        self.session = aioboto3.Session(
-            aws_access_key_id=aws_config.access_key_id,
-            aws_secret_access_key=aws_config.secret_access_key,
-            region_name=aws_config.region
-        )
+        # Let botocore resolve credentials from the default provider chain.
+        # In EKS this uses the web identity token supplied by IRSA.
+        self.session = aioboto3.Session(region_name=aws_config.region)
         self.reference_env = app_config.reference_env
         self.account_id = None
     
