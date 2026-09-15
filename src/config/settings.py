@@ -10,8 +10,6 @@ from dataclasses import dataclass, field
 class AWSConfig:
     """AWS configuration"""
     region: str = os.getenv("AWS_REGION", "ap-southeast-1")
-    access_key_id: Optional[str] = os.getenv("AWS_ACCESS_KEY_ID")
-    secret_access_key: Optional[str] = os.getenv("AWS_SECRET_ACCESS_KEY")
 
 
 @dataclass
