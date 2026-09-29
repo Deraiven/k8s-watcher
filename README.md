@@ -1,102 +1,330 @@
 # Namespace Watcher
 
-A Kubernetes controller that automatically manages infrastructure resources when namespaces are created or deleted.
+Namespace Watcher 是一个运行在 Kubernetes 集群中的异步控制服务，负责监听 Zadig 创建和删除 FAT 子环境时产生的 Kubernetes Namespace 事件，并同步管理子环境依赖的基础设施资源。
 
-## Features
+它不是业务服务，也不负责部署业务镜像。Zadig 负责创建环境和部署服务，Namespace Watcher 负责在环境生命周期内补齐、清理和修复外围资源，例如证书、DNS、AWS 消息资源、Kong 路由、Apollo 配置和 Istio 网络范围。
 
-- **Certificate Management**: Automatically creates SSL certificates using cert-manager with DNS-01 validation
-- **DNS Management**: Creates DNS A records in DNS Made Easy after certificate issuance
-- **AWS Resources**: Creates SQS queues and SNS topics
-- **Kong API Gateway**: Configures routes and uploads certificates
-- **Apollo Configuration**: Manages configuration database
-- **Zadig Workflow**: Updates workflow configurations
-- **Sub-Environment Deployment Monitor**: Watches deployment create/delete events for Zadig sub-environments
+## 解决的问题
 
-## Architecture
+创建一个 Zadig 子环境通常不只有 Namespace，还需要一组与环境名称绑定的外部资源：
 
-The application uses:
-- Async/await pattern for concurrent operations
-- Modular manager classes for different resources
-- Configuration through environment variables
-- Kubernetes secrets for sensitive data
-- Graceful shutdown handling
+- *.testN.shub.us 的 TLS 证书和 DNS 记录
+- 以 testN 命名的 SQS Queue 和 SNS Topic/Subscription
+- Kong 中对应环境的路由、服务、插件和证书
+- Apollo 中对应环境的 Cluster、Namespace、Item 和 Release
+- Zadig workflow 中的可选环境参数
+- Istio Sidecar 对跨 Namespace 配置访问范围的限制
 
-## Installation
+当环境被删除时，这些资源也需要按环境清理，否则会产生残留资源、错误路由、Apollo 配置污染和 AWS 成本。Namespace Watcher 将这些操作集中在一个生命周期控制器中执行。
 
-### Local Development
+## 核心职责
 
-1. Clone the repository
-2. Copy `.env.example` to `.env` and update values
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Run the application:
-   ```bash
-   python -m src.main
-   ```
+### 1. Namespace 生命周期监听
 
-### Kubernetes Deployment
+服务使用 Kubernetes Namespace watch stream 监听 ADDED 和 DELETED 事件。只有同时满足以下条件的 Namespace 才会处理：
 
-1. Update secrets in `k8s/secret.yaml`
-2. Update configuration in `k8s/configmap.yaml`
-3. Build and push Docker image:
-   ```bash
-   docker build -t namespace-watcher:latest .
-   docker push your-registry/namespace-watcher:latest
-   ```
-4. Deploy to Kubernetes:
-   ```bash
-   kubectl apply -f k8s/
-   ```
+- 名称以 test 开头
+- 名称符合 test 加数字的格式，例如 test1、test22
+- Namespace label 为 createdBy=koderover
+- 不在 EXCLUDED_NAMESPACES 白名单中
 
-## Configuration
+因此，普通系统 Namespace、非 Zadig 创建的 Namespace 和白名单环境不会被自动处理。
 
-All configuration is done through environment variables. See `.env.example` for available options.
+### 2. 子环境创建时的资源初始化
 
-### Feature Flags
+当 Zadig 创建一个符合条件的 Namespace 后，服务会启动以下流程：
 
-You can enable/disable specific features:
-- `ENABLE_CERT_MANAGEMENT`: SSL certificate management
-- `ENABLE_DNS_MANAGEMENT`: DNS record management
-- `ENABLE_AWS_RESOURCES`: AWS SQS/SNS management
-- `ENABLE_KONG_ROUTES`: Kong route management
-- `ENABLE_APOLLO_CONFIG`: Apollo configuration
-- `ENABLE_ZADIG_WORKFLOW`: Zadig workflow updates
-- `ENABLE_SUBENV_MONITOR`: monitor deployment events in sub-environments (requires Zadig)
-- `SUBENV_REFRESH_INTERVAL_SECONDS`: refresh interval for sub-environment list from Zadig
+~~~text
+Kubernetes Namespace ADDED
+        |
+        +-- 加入子环境 Deployment 监控
+        |
+        +-- 创建或等待 cert-manager Certificate
+        |       |
+        |       +-- Certificate Secret 就绪
+        |       +-- 上传证书到 Kong
+        |
+        +-- 并行创建 AWS SQS/SNS 资源
+        +-- 并行复制 Kong 环境路由
+        +-- 并行创建 Istio Sidecar scope
+        +-- 并行更新 Zadig workflow 参数
+        |
+        +-- Certificate 就绪后创建 Cloudflare DNS CNAME
+~~~
 
-## Security
+证书和 DNS 存在依赖关系，因此 DNS 会等待证书流程完成；AWS、Kong、Istio 和 Zadig workflow 更新可以并行执行。
 
-- All credentials are stored in Kubernetes secrets
-- Uses service account with minimal permissions
-- Non-root container execution
-- Certificates managed through Kubernetes-native cert-manager
+### 3. Deployment 级别的子环境监控
 
-## Monitoring
+Apollo 和部分 Kong 配置不是在 Namespace 创建时批量生成，而是由 Deployment 监控按实际服务创建。
 
-The application logs all operations with structured logging. Monitor the pod logs:
+这样可以保证：
 
-```bash
-kubectl logs -f deployment/namespace-watcher
-```
+- 子环境只创建实际部署服务对应的 Apollo Cluster
+- 参考环境中存在、但当前子环境没有部署的服务不会产生 Apollo 配置
+- 子环境后续新增服务时可以自动补齐配置
+- watcher 重启或监控刷新后，可以回放已有 Deployment，修复遗漏配置
 
-## Troubleshooting
+Deployment 监控会定期从 Zadig 获取子环境列表，并通过 Kubernetes Deployment watch stream 监听所有 Namespace 的 Deployment 事件，但只处理当前被 Zadig 识别为子环境的 Namespace。
 
-1. Check pod status:
-   ```bash
-   kubectl get pods -l app=namespace-watcher
-   ```
+Deployment 创建时会执行：
 
-2. View logs:
-   ```bash
-   kubectl logs -f deployment/namespace-watcher
-   ```
+- 确保 Kong 中存在对应服务的环境路由
+- 按服务复制 Apollo 配置
 
-3. Verify permissions:
-   ```bash
-   kubectl auth can-i --as=system:serviceaccount:default:namespace-watcher list namespaces
-   ```
+特殊服务映射：
+
+| Deployment | Apollo App 配置 |
+| --- | --- |
+| backoffice-v1-web-app | backoffice-v1-web、backoffice-v2-webapp |
+| beep-v1-web | beep-v1-web、beep-v1-webapp |
+| 其他 Deployment | 按 Deployment 名称匹配对应 App |
+
+bo-v1-assets 和 inventory-cronjob 当前被配置为跳过 Apollo 同步。
+
+Deployment 删除时会删除该服务对应的 Kong 路由。Apollo 配置在 Namespace 删除时统一清理，而不是在单个 Deployment 删除时立即删除，避免 Deployment 短暂重建时反复删除和创建配置。
+
+### 4. 子环境删除时的资源清理
+
+当 Namespace 收到 DELETED 事件时，服务会执行环境级清理：
+
+- 删除 Cloudflare wildcard DNS CNAME
+- 删除 cert-manager Certificate 和 TLS Secret
+- 从 Kong 删除环境路由、服务、插件和证书关联
+- 删除该环境的 SQS Queue
+- 删除该环境的 SNS Subscription 和 Topic
+- 删除 Apollo 中该环境的 Cluster、Namespace、Item 和 Release
+- 从 Zadig workflow 的环境参数中移除该环境
+- 删除 Istio Sidecar scope
+- 从子环境 Deployment 监控集合中移除该 Namespace
+- 更新 Redis 中的 Namespace 状态
+
+删除操作尽可能保持幂等。资源不存在时会记录并跳过，以支持重复事件、watch stream 重启和部分失败后的重试。
+
+## Apollo 配置策略
+
+参考环境默认为 test33，由 REFERENCE_ENV 配置。
+
+Apollo 配置复制遵循以下策略：
+
+1. Namespace 创建时不再复制参考环境的全部 Apollo Cluster。
+2. Deployment 被发现时，按实际 App 创建目标环境的 Cluster。
+3. 只复制非 secret Namespace。
+4. 复制 web.<app> Namespace 下的配置 Item。
+5. 创建缺失的 Release；已有配置不会重复插入。
+6. 对已经存在 Cluster 但缺少 Namespace、Item 或 Release 的环境执行补偿同步。
+
+这可以避免新子环境出现大量未部署服务的 Apollo Cluster，也可以修复历史上 Cluster 已存在但 Namespace 没有创建的部分状态。
+
+## AWS 资源和身份认证
+
+AWS Manager 负责复制和清理参考环境 REFERENCE_ENV 对应的 SQS/SNS 资源：
+
+- SQS：分页扫描 Queue、读取 Queue attributes、创建 Queue、删除 Queue
+- SNS：创建 Topic、读取参考 Topic subscriptions、复制 SQS subscription、读取 subscription attributes、删除 subscription 和 Topic
+- STS：调用 GetCallerIdentity 获取账号 ID，用于生成 Topic ARN
+
+AWS SDK 使用 aioboto3 默认 credential provider chain，不在代码或配置中保存 AWS access key/secret。运行在 EKS 时应通过 IRSA 提供身份，Pod 的 AWS 身份应显示为：
+
+~~~text
+arn:aws:sts::<account-id>:assumed-role/<role-name>/<session>
+~~~
+
+而不应该是 IAM 用户身份。IRSA Role 需要具备代码实际使用的 SQS、SNS 和 sts:GetCallerIdentity 权限。
+
+## 定时环境清理
+
+Zadig Manager 注册了每天北京时间凌晨 3 点执行的清理任务。调度时区由 SCHEDULER_TZ 控制，当前 Kubernetes 配置使用 CST-8。
+
+清理规则：
+
+- 只处理名称符合 test\d+ 的环境
+- 跳过白名单环境：test17、test33、test5、test50
+- 跳过生产环境
+- Namespace 创建超过 7 天：调用 Zadig sleep API 进入睡眠状态
+- 已睡眠超过 7 天：调用 Zadig API 删除环境
+
+同时还有孤儿 Namespace 清理任务：
+
+- 获取 Zadig FAT 项目中的环境列表
+- 扫描集群 Namespace
+- 只检查 test 加数字的 Namespace
+- 只处理 createdBy=koderover 的 Namespace
+- 集群中存在、但 Zadig 项目中不存在的 Namespace 会被删除
+
+## 状态恢复和 Reconcile
+
+Redis 用于保存已处理 Namespace 的状态和资源记录。服务启动时会：
+
+- 加载 Redis 中的 active Namespace
+- 扫描集群现有 Namespace
+- 找出不在 Redis 中的 Namespace 并执行 reconcile
+- 找出超过 24 小时未 reconcile 的 Namespace 并重新检查
+- 检查 Redis 中已标记删除但集群中已经不存在的 Namespace
+- 重新补齐现有 Namespace 的 Istio Sidecar scope
+
+Deployment 监控也会在新 Namespace 加入监控时扫描已有 Deployment，避免 Deployment 早于 watcher 监控建立而漏掉 Apollo 或 Kong 同步。
+
+## 组件结构
+
+~~~text
+src/main.py
+  NamespaceWatcher
+    Kubernetes Namespace watch
+    创建/删除生命周期编排
+    Redis 状态管理
+
+src/managers/
+  aws_manager.py              SQS/SNS 和 STS
+  apollo_manager.py           Apollo Cluster/Namespace/Item/Release
+  cert_manager.py             cert-manager 和 Kong 证书
+  dns_manager.py              Cloudflare wildcard CNAME
+  kong_manager.py             Kong 路由、服务、插件和证书
+  istio_sidecar_manager.py    Istio Sidecar scope
+  zadig_manager.py            Zadig API、workflow、睡眠和清理
+  subenv_monitor.py           子环境列表和 Deployment 监控
+  redis_state_manager.py      Namespace 状态和资源记录
+
+src/config/settings.py        环境变量配置
+src/utils/retry.py            异步重试
+src/utils/schedule.py         定时任务
+~~~
+
+## 配置
+
+完整配置见 .env.example。常用配置如下：
+
+| 配置 | 说明 | 默认值 |
+| --- | --- | --- |
+| REFERENCE_ENV | 资源和配置复制的参考环境 | test33 |
+| NAMESPACE_PREFIX | Namespace 前缀 | test |
+| NAMESPACE_LABEL_KEY | Namespace 管理标签名 | createdBy |
+| NAMESPACE_LABEL_VALUE | Namespace 管理标签值 | koderover |
+| EXCLUDED_NAMESPACES | 不处理的 Namespace，逗号分隔 | test17,test33 |
+| AWS_REGION | AWS 区域 | ap-southeast-1 |
+| ENABLE_AWS_RESOURCES | 是否管理 SQS/SNS | true |
+| ENABLE_APOLLO_CONFIG | 是否同步 Apollo | true |
+| ENABLE_KONG_ROUTES | 是否管理 Kong | true |
+| ENABLE_CERT_MANAGEMENT | 是否管理证书 | true |
+| ENABLE_DNS_MANAGEMENT | 是否管理 Cloudflare DNS | true |
+| ENABLE_ISTIO_SIDECAR_SCOPE | 是否管理 Istio Sidecar | true |
+| ENABLE_SUBENV_MONITOR | 是否监听子环境 Deployment | true |
+| SUBENV_REFRESH_INTERVAL_SECONDS | Zadig 环境刷新间隔 | 60 |
+| WATCH_STREAM_TIMEOUT_SECONDS | Kubernetes watch stream 超时 | 600 |
+| SCHEDULER_TZ | 定时任务时区 | CST-8 |
+
+敏感配置应通过 Kubernetes Secret 注入，包括 Zadig token、Apollo/MySQL 密码、Cloudflare token 和 Redis 连接信息。AWS 不使用静态 access key/secret，而使用 IRSA。
+
+## 本地运行
+
+~~~bash
+cp .env.example .env
+pip install -r requirements.txt
+python -m src.main
+~~~
+
+本地运行需要可用的 Kubernetes kubeconfig，并设置 IN_CLUSTER=false。如果启用外部资源管理，还需要提供对应的 Zadig、Apollo、Cloudflare、Kong、Redis 和 AWS 访问配置。AWS 本地运行应使用 AWS CLI profile、SSO 或其他默认 credential provider，不要把 access key 写入代码或 .env。
+
+## Kubernetes 部署
+
+~~~bash
+docker build -t namespace-watcher:latest .
+docker push <registry>/namespace-watcher:<tag>
+kubectl apply -f k8s/
+~~~
+
+部署前需要确认：
+
+- Deployment 使用正确的镜像版本
+- ServiceAccount 绑定了 IRSA Role
+- Secret 和 ConfigMap 已更新
+- k8s/rbac.yaml 包含 Namespace、Deployment、Secret、Certificate、Sidecar 和 Event 所需权限
+- IRSA Role 包含代码实际使用的 SQS/SNS/STS 权限
+
+## 重要日志
+
+创建 Namespace：
+
+~~~text
+Processing namespace creation: testN
+Created Certificate resource: shub-us-testN-certificate
+Created DNS record: *.testN.shub.us
+Completed namespace creation processing: testN
+~~~
+
+Deployment 级别 Apollo 同步：
+
+~~~text
+Sub-env deployment event: ADDED ns=testN deployment=backoffice-v1-web-app
+Apollo app config synced for app=backoffice-v2-webapp env=testN ...
+Apollo app config synced for app=backoffice-v1-web env=testN ...
+~~~
+
+删除 Namespace：
+
+~~~text
+Processing namespace deletion: testN
+Deleted DNS record: *.testN.shub.us
+Deleted Certificate resource: shub-us-testN-certificate
+Deleted SQS queue: ...
+Deleted SNS topic: notification_testN
+Completed namespace deletion processing: testN
+~~~
+
+## 故障排查
+
+### AWS 报 AccessDenied
+
+确认 Pod 使用的是 IRSA Role，而不是已回收的 IAM user access key：
+
+~~~bash
+kubectl -n <namespace> describe serviceaccount <service-account>
+kubectl -n <namespace> exec deploy/<deployment> -- env \
+  | grep -E 'AWS_(ROLE_ARN|WEB_IDENTITY_TOKEN_FILE|ACCESS_KEY|SECRET_KEY)'
+~~~
+
+重点检查：ServiceAccount annotation、Pod 是否重新创建、IRSA Role trust policy，以及 SQS/SNS IAM policy。
+
+### Apollo 缺少 Namespace
+
+检查以下日志：
+
+- 是否收到对应 Deployment 的 ADDED 事件
+- 是否出现 Apollo app config synced
+- 是否出现 No Apollo cluster available
+- Pod 是否运行包含最新 Apollo 修复的镜像
+
+Namespace 创建本身不会复制所有 Apollo Cluster；必须由实际 Deployment 触发对应 App 的同步。
+
+### Deployment 事件没有触发
+
+确认：
+
+- Zadig API 能返回该环境
+- Namespace 名称符合 test\d+ 且不在排除列表
+- ENABLE_SUBENV_MONITOR=true
+- ServiceAccount 有 apps/deployments 的 get/list/watch 权限
+- 日志中是否出现 Sub-env monitor updated
+- watch stream 是否频繁出现错误或重启
+
+### 删除后有资源残留
+
+删除操作是异步并行执行的，应根据日志分别检查 DNS、Certificate、AWS、Kong、Apollo、Zadig workflow 和 Sidecar。外部系统 API 失败不会自动保证其他系统回滚，需要根据失败日志重试或执行对应系统的幂等清理。
+
+## 安全边界
+
+- Kubernetes API 使用专用 ServiceAccount 和最小 RBAC
+- AWS 使用 IRSA，不在代码、镜像或示例配置中保存静态 access key/secret
+- 外部系统 token 和密码通过 Kubernetes Secret 注入
+- 删除逻辑仅处理符合规则且由 koderover 创建的测试 Namespace
+- 资源名称匹配使用环境 token，避免把 test1 误匹配为 test10 或 test12
+- 生产环境和白名单环境不会被定时清理
+
+## 相关文档
+
+- [执行流程](docs/execution-flow.md)
+- [Namespace 创建说明](docs/namespace-creation.md)
+- [并行处理说明](docs/parallel-processing.md)
 
 ## License
 
