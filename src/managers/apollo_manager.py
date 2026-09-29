@@ -219,6 +219,9 @@ class ApolloManager:
         # For backoffice web app, keep both legacy and v2 app configs in sync.
         if deployment_name == "backoffice-v1-web-app":
             return ["backoffice-v2-webapp", "backoffice-v1-web"]
+        # All backoffice web workloads share the legacy Apollo configuration.
+        if deployment_name == "backoffice-v1-web" or deployment_name.startswith("backoffice-v1-web-"):
+            return ["backoffice-v1-web"]
         # For beep web app, keep both legacy and webapp configs in sync.
         if deployment_name == "beep-v1-web":
             return ["beep-v1-web", "beep-v1-webapp"]
