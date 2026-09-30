@@ -245,6 +245,7 @@ class KongManager:
                 protocol="http",
                 headers=headers,
             )
+            await self._ensure_pre_function_plugin(session, service_name, headers)
             await self._ensure_route(
                 session,
                 service_name=service_name,
@@ -263,11 +264,17 @@ class KongManager:
     @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
     async def remove_subenv_deployment_routes(self, deployment_name: str, env: str) -> bool:
         """Delete deployment-specific routes for monitored sub-environments."""
-        # Keep behavior aligned with demo script: only web-app deletion path.
-        if deployment_name != "backoffice-v1-web-app":
+        if deployment_name not in ("backoffice-v1-web-app", "backoffice-v1-web-api"):
             return True
 
         async with aiohttp.ClientSession() as session:
+            if deployment_name == "backoffice-v1-web-api":
+                service_name = f"{deployment_name}-{env}"
+                await self._delete_service_routes_by_env(session, service_name, env)
+                await self._delete_service_if_exists(session, service_name)
+                logger.info("Removed sub-environment API routes: namespace=%s service=%s", env, service_name)
+                return True
+
             await self._delete_service_routes_by_env(session, f"backoffice-v1-web-app-{env}", env)
             await self._delete_service_if_exists(session, f"backoffice-v1-web-app-{env}")
             await self._delete_service_routes_by_env(session, f"bo-v1-assets-{env}", env)
@@ -298,13 +305,6 @@ class KongManager:
                 raise RuntimeError(f"Failed to create service {service_name}: {error_text}")
 
     async def _ensure_pre_function_plugin(self, session: aiohttp.ClientSession, service_name: str, headers: Dict[str, str]):
-        async with session.get(f"{self.admin_url}/services/{service_name}/plugins") as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                for plugin in data.get("data", []):
-                    if plugin.get("name") == "pre-function":
-                        return
-
         payload = {
             "protocols": ["grpc", "grpcs", "http", "https"],
             "enabled": True,
@@ -312,8 +312,8 @@ class KongManager:
                 "certificate": [],
                 "rewrite": [],
                 "access": [
-                    "local random = math.random local function uuid() local template = \"xx-x4xxxxyxxyyyyxxyx4xxxxyxxyyyyxxy-yxxxxxyxyyxyxyxx-xx\" local ans = string.gsub(template, \"[xy]\", function(c) local v = (c == \"x\") and random(0, 0xf) or random(8, 0xb) return string.format(\"%x\", v) end) return ans end kong.service.request.add_header(\"traceparent\", uuid())",
                     "function split(s, delimiter) res = {} for match in (s .. delimiter):gmatch(\"([^.]+)\" .. delimiter) do table.insert(res, match) end if #res == 5 then return res[3] else return res[2] end end local host = kong.request.get_host() local env = split(host, \".\") kong.service.request.add_header(\"x-env\", env)",
+                    "local random = math.random local function uuid() local template = \"xx-x4xxxxyxxyyyyxxyx4xxxxyxxyyyyxxy-yxxxxxyxyyxyxyxx-xx\" local ans = string.gsub( template, \"[xy]\", function(c) local v = (c == \"x\") and random(0, 0xf) or random(8, 0xb) return string.format(\"%x\", v) end ) return ans end kong.service.request.add_header(\"traceparent\", uuid())",
                 ],
                 "header_filter": [],
                 "body_filter": [],
@@ -321,6 +321,30 @@ class KongManager:
             },
             "name": "pre-function",
         }
+
+        async with session.get(f"{self.admin_url}/services/{service_name}/plugins") as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                for plugin in data.get("data", []):
+                    if plugin.get("name") == "pre-function":
+                        if plugin.get("config", {}).get("access") == payload["config"]["access"]:
+                            return
+                        plugin_id = plugin.get("id")
+                        if not plugin_id:
+                            raise RuntimeError(f"Existing pre-function plugin for {service_name} has no id")
+                        async with session.patch(
+                            f"{self.admin_url}/plugins/{plugin_id}",
+                            headers=headers,
+                            data=json.dumps(payload),
+                        ) as update_resp:
+                            if update_resp.status not in (200, 201):
+                                error_text = await update_resp.text()
+                                raise RuntimeError(
+                                    f"Failed to update pre-function plugin for {service_name}: {error_text}"
+                                )
+                            logger.info("Updated pre-function plugin for service %s", service_name)
+                        return
+
         async with session.post(
             f"{self.admin_url}/services/{service_name}/plugins",
             headers=headers,
