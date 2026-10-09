@@ -82,7 +82,7 @@ Deployment 创建时会执行：
 
 bo-v1-assets 和 inventory-cronjob 当前被配置为跳过 Apollo 同步。
 
-Deployment 删除时会删除该服务对应的 Kong 路由。Apollo 配置在 Namespace 删除时统一清理，而不是在单个 Deployment 删除时立即删除，避免 Deployment 短暂重建时反复删除和创建配置。
+Deployment 删除时会删除该服务对应的 Kong 路由，不立即删除 Apollo 配置。Apollo 2.4.0 OpenAPI 不支持删除 Cluster；Namespace 删除时会明确记录 Apollo 清理失败，需要在 Portal 人工清理，不会回退到数据库直写。
 
 ### 4. 子环境删除时的资源清理
 
@@ -93,7 +93,7 @@ Deployment 删除时会删除该服务对应的 Kong 路由。Apollo 配置在 N
 - 从 Kong 删除环境路由、服务、插件和证书关联
 - 删除该环境的 SQS Queue
 - 删除该环境的 SNS Subscription 和 Topic
-- 删除 Apollo 中该环境的 Cluster、Namespace、Item 和 Release
+- 报告 Apollo Cluster 人工清理需求（2.4.0 OpenAPI 不支持删除 Cluster）
 - 从 Zadig workflow 的环境参数中移除该环境
 - 删除 Istio Sidecar scope
 - 从子环境 Deployment 监控集合中移除该 Namespace
@@ -109,12 +109,30 @@ Apollo 配置复制遵循以下策略：
 
 1. Namespace 创建时不再复制参考环境的全部 Apollo Cluster。
 2. Deployment 被发现时，按实际 App 创建目标环境的 Cluster。
-3. 只复制非 secret Namespace。
-4. 复制 web.<app> Namespace 下的配置 Item。
-5. 创建缺失的 Release；已有配置不会重复插入。
-6. 对已经存在 Cluster 但缺少 Namespace、Item 或 Release 的环境执行补偿同步。
+3. 通过 OpenAPI 创建 Cluster，由 Apollo 自动实例化 App Namespace；可能出现空 secret Namespace，但 watcher 不读取或复制其中的配置。
+4. 只读取并复制 web.<app> Namespace 下的配置 Item，已有 key 不覆盖。保留原有环境名替换规则，SQS URL 和 SNS ARN 不替换。
+5. 没有 Release 时通过发布接口创建首次 Release，包含目标 Namespace 当前配置；已有 Release 不自动重发，避免发布人工草稿。补齐已有 Release 的缺失 Item 后，需要在 Portal 审核发布。
+6. 已有 Cluster 缺少 web.<app> Namespace 时明确报错，需要在 Portal 修复；2.4.0 OpenAPI 不支持向已有 Cluster 单独挂载 Namespace。缺失 Item 或首次 Release 可在后续同步时补齐。
 
-这可以避免新子环境出现大量未部署服务的 Apollo Cluster，也可以修复历史上 Cluster 已存在但 Namespace 没有创建的部分状态。
+只为实际 Deployment 创建 Apollo Cluster。OpenAPI 操作不是数据库事务，失败后可能留下部分状态；重试会跳过已有 Cluster 和 Item。不要将一次同步日志视为全部系统均成功。
+
+### Apollo OpenAPI 配置
+
+不再连接 Apollo MySQL，也不需要 MYSQL_* 环境变量或数据库权限。
+
+| 环境变量 | 用途 | 默认值 |
+| --- | --- | --- |
+| APOLLO_URL | Portal 地址（不是 Config Service） | https://apollo.shub.us |
+| APOLLO_ENV | Apollo 环境，不是 testN Cluster 名 | FAT |
+| APOLLO_API_TOKEN | OpenAPI Token，通过 Secret 注入 | 必填 |
+| APOLLO_OPERATOR | Apollo 中已存在的操作用户 | namespace-watcher |
+| APOLLO_TIMEOUT_SECONDS | 单次 HTTP 请求超时秒数 | 30 |
+
+在现有 `namespace-watcher-secrets` Secret 中添加 `APOLLO_API_TOKEN`；Deployment 已通过 `envFrom.secretRef` 注入，不要把真实 Token 提交到仓库。更新 Secret 后重启 watcher Pod，环境变量才会生效。缺少 Token 且启用 Apollo 时启动直接失败。
+
+在 Apollo Portal 的开放平台为 Token 授予对应 App 的创建 Cluster 权限，以及 `web.<app>` Namespace 在 FAT 的修改和发布权限；别名对应的两个 App 都需要授权。`APOLLO_OPERATOR` 必须是 Apollo 已存在的用户，不会自动创建。Token 通过原始 `Authorization` Header 发送，不加 `Bearer` 前缀。401/403 不自动重试；只对读取操作的限流、服务端错误和网络错误做有限重试。不会记录 Token 或 API 响应配置内容。
+
+限制依据 Apollo v2.4.0 官方 [ClusterController](https://github.com/apolloconfig/apollo/blob/v2.4.0/apollo-portal/src/main/java/com/ctrip/framework/apollo/openapi/v1/controller/ClusterController.java) 和 [NamespaceController](https://github.com/apolloconfig/apollo/blob/v2.4.0/apollo-portal/src/main/java/com/ctrip/framework/apollo/openapi/v1/controller/NamespaceController.java)。若必须保留自动删除 Cluster，需要另行设计受控清理接口，不能假设 OpenAPI 支持 DELETE。
 
 ## AWS 资源和身份认证
 
@@ -213,7 +231,7 @@ src/utils/schedule.py         定时任务
 | WATCH_STREAM_TIMEOUT_SECONDS | Kubernetes watch stream 超时 | 600 |
 | SCHEDULER_TZ | 定时任务时区 | CST-8 |
 
-敏感配置应通过 Kubernetes Secret 注入，包括 Zadig token、Apollo/MySQL 密码、Cloudflare token 和 Redis 连接信息。AWS 不使用静态 access key/secret，而使用 IRSA。
+敏感配置应通过 Kubernetes Secret 注入，包括 Zadig token、Apollo OpenAPI Token、Cloudflare token 和 Redis 连接信息。AWS 不使用静态 access key/secret，而使用 IRSA。
 
 ## 本地运行
 

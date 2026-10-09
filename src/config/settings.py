@@ -13,13 +13,13 @@ class AWSConfig:
 
 
 @dataclass
-class DatabaseConfig:
-    """Database configuration"""
-    host: str = os.getenv("MYSQL_HOST", "localhost")
-    port: int = int(os.getenv("MYSQL_PORT", "3306"))
-    user: str = os.getenv("MYSQL_USER", "apollo_user")
-    password: Optional[str] = os.getenv("MYSQL_PASSWORD")
-    database: str = os.getenv("MYSQL_DATABASE", "ApolloConfigDB_fat")
+class ApolloConfig:
+    """Apollo Portal OpenAPI (Apollo environment is not a sub-env cluster)."""
+    url: str = os.getenv("APOLLO_URL", "https://apollo.shub.us")
+    token: Optional[str] = os.getenv("APOLLO_API_TOKEN")
+    env: str = os.getenv("APOLLO_ENV", "FAT")
+    operator: str = os.getenv("APOLLO_OPERATOR", "namespace-watcher")
+    timeout_seconds: int = int(os.getenv("APOLLO_TIMEOUT_SECONDS", "30"))
 
 
 @dataclass
@@ -90,7 +90,7 @@ class AppConfig:
 
 # Global configuration instances
 aws_config = AWSConfig()
-db_config = DatabaseConfig()
+apollo_config = ApolloConfig()
 kong_config = KongConfig()
 zadig_config = ZadigConfig()
 cloudflare_config = CloudflareConfig()

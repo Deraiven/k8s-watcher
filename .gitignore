@@ -62,4 +62,5 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
-tests/
+tests/*
+!tests/test_apollo_openapi.py
