@@ -20,6 +20,9 @@ class ApolloConfig:
     env: str = os.getenv("APOLLO_ENV", "FAT")
     operator: str = os.getenv("APOLLO_OPERATOR", "namespace-watcher")
     timeout_seconds: int = int(os.getenv("APOLLO_TIMEOUT_SECONDS", "30"))
+    admin_url: str = os.getenv("APOLLO_ADMIN_URL", "https://apollo-admin-fat.shub.us")
+    hmac_username: Optional[str] = os.getenv("KONG_HMAC_USERNAME")
+    hmac_secret: Optional[str] = os.getenv("KONG_HMAC_SECRET")
 
 
 @dataclass

@@ -23,6 +23,7 @@ data:
   APOLLO_ENV: FAT
   APOLLO_OPERATOR: namespace-watcher
   APOLLO_TIMEOUT_SECONDS: "30"
+  APOLLO_ADMIN_URL: https://apollo-admin-fat.shub.us
   NAMESPACE_LABEL_KEY: createdBy
   NAMESPACE_LABEL_VALUE: koderover
   NAMESPACE_PREFIX: test

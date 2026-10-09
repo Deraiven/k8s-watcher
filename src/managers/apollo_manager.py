@@ -1,9 +1,15 @@
 """Apollo 2.4 configuration management through the Portal OpenAPI."""
 import asyncio
+import base64
+import hashlib
+import hmac
+import re
+from email.utils import formatdate
 from typing import Dict, List
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import aiohttp
+from yarl import URL
 
 from ..config.settings import apollo_config, app_config
 from ..utils.logger import setup_logger
@@ -28,6 +34,9 @@ class ApolloManager:
         self.apollo_env = apollo_config.env
         self.operator = apollo_config.operator
         self.timeout = apollo_config.timeout_seconds
+        self.admin_url = apollo_config.admin_url.rstrip("/")
+        self.hmac_username = apollo_config.hmac_username
+        self.hmac_secret = apollo_config.hmac_secret
         if not self.token:
             raise ValueError("APOLLO_API_TOKEN is required when ENABLE_APOLLO_CONFIG=true")
         if not self.operator:
@@ -78,11 +87,79 @@ class ApolloManager:
         )
 
     async def delete_cluster_config(self, env: str) -> bool:
-        # 2.4.0 has no OpenAPI Cluster DELETE. Never pretend cleanup succeeded.
-        raise NotImplementedError(
-            f"Apollo 2.4.0 OpenAPI cannot delete cluster {env}; "
-            "remove it through the Apollo Portal. Database fallback is disabled."
-        )
+        if (not re.fullmatch(r"test[0-9]+", env) or env == self.reference_env
+                or env in app_config.excluded_namespaces):
+            raise ValueError(f"Refusing to delete protected or invalid Apollo cluster {env}")
+        if not self.hmac_username or not self.hmac_secret:
+            raise ValueError("KONG_HMAC_USERNAME and KONG_HMAC_SECRET are required for Apollo cleanup")
+        base = URL(self.admin_url)
+        if (base.scheme != "https" or not base.host or base.user is not None
+                or base.path != "/" or base.query_string or base.fragment):
+            raise ValueError("APOLLO_ADMIN_URL must be an HTTPS origin without a path or credentials")
+        async with self._lock, aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=self.timeout)
+        ) as session:
+            # Finish enumeration before deleting; never use token-scoped Portal apps.
+            apps = set()
+            page = 0
+            while True:
+                batch = await self._admin_request(session, "GET", f"/apps?page={page}&size=100")
+                if not isinstance(batch, list) or any(
+                    not isinstance(app, dict) or not isinstance(app.get("appId"), str)
+                    or not app["appId"] for app in batch
+                ):
+                    raise RuntimeError("Invalid Apollo Admin app listing")
+                if not batch:
+                    break
+                identifiers = {app["appId"] for app in batch}
+                if identifiers & apps:
+                    raise RuntimeError("Apollo Admin pagination repeated apps; cleanup aborted")
+                apps.update(identifiers)
+                page += 1
+            deleted = 0
+            for app_id in sorted(apps):
+                path = f"/apps/{quote(app_id, safe='')}/clusters/{quote(env, safe='')}"
+                cluster = await self._admin_request(session, "GET", path, missing_ok=True)
+                if cluster is None:
+                    continue
+                if not isinstance(cluster, dict) or cluster.get("name") != env or cluster.get("appId") != app_id:
+                    raise RuntimeError("Apollo Admin returned a mismatched cluster; cleanup aborted")
+                await self._admin_request(session, "DELETE", path + "?" + urlencode({"operator": self.operator}),
+                                          missing_ok=True)
+                deleted += 1
+                logger.info("Deleted Apollo cluster app=%s cluster=%s", app_id, env)
+        logger.info("Successfully deleted Apollo configuration for %s, clusters_deleted=%s", env, deleted)
+        return True
+
+    def _admin_headers(self, method, path):
+        if any(char in self.hmac_username for char in ('"', '\\', '\r', '\n')):
+            raise ValueError("Invalid KONG_HMAC_USERNAME")
+        date = formatdate(usegmt=True)
+        signing_string = f"date: {date}\nrequest-line: {method} {path} HTTP/1.1"
+        signature = base64.b64encode(hmac.new(
+            self.hmac_secret.encode(), signing_string.encode(), hashlib.sha256
+        ).digest()).decode()
+        return {"Date": date, "Authorization": (
+            f'hmac username="{self.hmac_username}", algorithm="hmac-sha256", '
+            f'headers="date request-line", signature="{signature}"'
+        )}
+
+    async def _admin_request(self, session, method, path, *, missing_ok=False):
+        # Preserve the exact escaped request target used in the HMAC signature.
+        url = URL(self.admin_url + path, encoded=True)
+        try:
+            async with session.request(method, url, headers=self._admin_headers(method, path),
+                                       allow_redirects=False) as response:
+                if response.status == 404 and missing_ok:
+                    return None
+                if not 200 <= response.status < 300:
+                    raise RuntimeError(f"Apollo Admin {method} failed: HTTP {response.status}")
+                # Admin DELETE returns an empty 200 response, not necessarily 204.
+                if method == "DELETE":
+                    return None
+                return await response.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            raise RuntimeError(f"Apollo Admin {method} transport or response failure") from None
 
     async def get_cluster_apps(self, env: str) -> List[Dict[str, str]]:
         results = []
