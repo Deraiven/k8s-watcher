@@ -19,10 +19,10 @@ data:
   IN_CLUSTER: "true"
   KONG_ADMIN_URL: http://kong-kong-admin.proxy:8001
   LOG_LEVEL: INFO
-  MYSQL_DATABASE: ApolloConfigDB_fat
-  MYSQL_HOST: 192.168.0.50
-  MYSQL_PORT: "3306"
-  MYSQL_USER: apollo_user
+  APOLLO_URL: https://apollo.shub.us
+  APOLLO_ENV: FAT
+  APOLLO_OPERATOR: namespace-watcher
+  APOLLO_TIMEOUT_SECONDS: "30"
   NAMESPACE_LABEL_KEY: createdBy
   NAMESPACE_LABEL_VALUE: koderover
   NAMESPACE_PREFIX: test
