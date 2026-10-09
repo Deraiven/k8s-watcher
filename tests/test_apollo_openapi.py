@@ -89,12 +89,71 @@ class ApolloTests(unittest.IsolatedAsyncioTestCase):
                          ['beep-v1-web', 'beep-v1-webapp'])
         self.assertFalse(await self.manager.ensure_subenv_app_config('bo-v1-assets', 'test99'))
 
-    async def test_protected_cluster_and_unsupported_delete(self):
+    async def test_protected_cluster_and_missing_admin_credentials(self):
         with self.assertRaises(ValueError):
             await self.manager.ensure_subenv_app_config('orders', self.manager.reference_env)
-        with self.assertRaises(NotImplementedError):
+        self.manager.hmac_username = None
+        with self.assertRaises(ValueError):
             await self.manager.delete_cluster_config('test99')
         self.api.assert_not_awaited()
+
+    async def test_admin_cleanup_pagination_and_exact_name(self):
+        self.manager.hmac_username = 'watcher'
+        self.manager.hmac_secret = 'test-secret'
+        admin = AsyncMock(side_effect=[
+            [{'appId': 'orders'}], [{'appId': 'other'}], [],
+            {'appId': 'orders', 'name': 'test99'}, None, None,
+        ])
+        self.manager._admin_request = admin
+        self.assertTrue(await self.manager.delete_cluster_config('test99'))
+        requests = [(c.args[1], c.args[2]) for c in admin.call_args_list]
+        self.assertEqual(requests[:3], [('GET', '/apps?page=0&size=100'),
+                                      ('GET', '/apps?page=1&size=100'),
+                                      ('GET', '/apps?page=2&size=100')])
+        deletes = [path for method, path in requests if method == 'DELETE']
+        self.assertEqual(deletes, ['/apps/orders/clusters/test99?operator=namespace-watcher'])
+
+    async def test_admin_delete_protected_names(self):
+        for env in ('test33', 'test17', 'default', 'prod', 'test1-extra', '../test1'):
+            with self.subTest(env=env), self.assertRaises(ValueError):
+                await self.manager.delete_cluster_config(env)
+
+    async def test_admin_repeated_page_aborts_before_delete(self):
+        self.manager.hmac_username = 'watcher'
+        self.manager.hmac_secret = 'test-secret'
+        admin = AsyncMock(return_value=[{'appId': 'orders'}])
+        self.manager._admin_request = admin
+        with self.assertRaisesRegex(RuntimeError, 'pagination repeated'):
+            await self.manager.delete_cluster_config('test99')
+        self.assertTrue(all(c.args[1] == 'GET' for c in admin.call_args_list))
+
+    async def test_admin_http_signing_and_empty_delete(self):
+        import base64
+        import hashlib
+        import hmac
+
+        self.manager.hmac_username = 'watcher'
+        self.manager.hmac_secret = 'test-secret'
+        path = '/apps/orders/clusters/test99?operator=a%2Bb+user'
+        date = 'Fri, 09 Oct 2026 01:00:00 GMT'
+        message = f'date: {date}\nrequest-line: DELETE {path} HTTP/1.1'
+        signature = base64.b64encode(hmac.new(b'test-secret', message.encode(), hashlib.sha256).digest()).decode()
+        session = unittest.mock.MagicMock()
+        response = AsyncMock()
+        session.request.return_value.__aenter__.return_value = response
+        response.status = 200
+        with patch('src.managers.apollo_manager.formatdate', return_value=date):
+            await self.manager._admin_request(session, 'DELETE', path)
+        kwargs = session.request.call_args.kwargs
+        self.assertIn(f'signature="{signature}"', kwargs['headers']['Authorization'])
+        self.assertEqual(session.request.call_args.args[1].raw_path_qs, path)
+        self.assertFalse(kwargs['allow_redirects'])
+        response.json.assert_not_awaited()
+        response.status = 403
+        with self.assertRaisesRegex(RuntimeError, 'HTTP 403'):
+            await self.manager._admin_request(session, 'DELETE', path, missing_ok=True)
+        response.status = 404
+        self.assertIsNone(await self.manager._admin_request(session, 'DELETE', path, missing_ok=True))
 
     async def test_missing_target_namespace_is_error(self):
         original = self.api.side_effect

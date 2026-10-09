@@ -82,7 +82,7 @@ Deployment 创建时会执行：
 
 bo-v1-assets 和 inventory-cronjob 当前被配置为跳过 Apollo 同步。
 
-Deployment 删除时会删除该服务对应的 Kong 路由，不立即删除 Apollo 配置。Apollo 2.4.0 OpenAPI 不支持删除 Cluster；Namespace 删除时会明确记录 Apollo 清理失败，需要在 Portal 人工清理，不会回退到数据库直写。
+Deployment 删除时会删除该服务对应的 Kong 路由，不立即删除 Apollo 配置。Namespace 删除时，通过 Kong HMAC 认证调用 Apollo Admin Service 删除对应 Cluster，不回退到数据库直写。
 
 ### 4. 子环境删除时的资源清理
 
@@ -93,7 +93,7 @@ Deployment 删除时会删除该服务对应的 Kong 路由，不立即删除 Ap
 - 从 Kong 删除环境路由、服务、插件和证书关联
 - 删除该环境的 SQS Queue
 - 删除该环境的 SNS Subscription 和 Topic
-- 报告 Apollo Cluster 人工清理需求（2.4.0 OpenAPI 不支持删除 Cluster）
+- 通过 Apollo Admin Service 删除该环境在各 App 下的 Cluster
 - 从 Zadig workflow 的环境参数中移除该环境
 - 删除 Istio Sidecar scope
 - 从子环境 Deployment 监控集合中移除该 Namespace
@@ -127,12 +127,19 @@ Apollo 配置复制遵循以下策略：
 | APOLLO_API_TOKEN | OpenAPI Token，通过 Secret 注入 | 必填 |
 | APOLLO_OPERATOR | Apollo 中已存在的操作用户 | namespace-watcher |
 | APOLLO_TIMEOUT_SECONDS | 单次 HTTP 请求超时秒数 | 30 |
+| APOLLO_ADMIN_URL | 删除操作使用的 Admin Service 地址，必须与 APOLLO_ENV 属于同一环境 | https://apollo-admin-fat.shub.us |
+| KONG_HMAC_USERNAME | Admin Service 网关 HMAC 用户名，通过 Secret 注入 | 删除时必填 |
+| KONG_HMAC_SECRET | Admin Service 网关 HMAC 密钥，通过 Secret 注入 | 删除时必填 |
 
 在现有 `namespace-watcher-secrets` Secret 中添加 `APOLLO_API_TOKEN`；Deployment 已通过 `envFrom.secretRef` 注入，不要把真实 Token 提交到仓库。更新 Secret 后重启 watcher Pod，环境变量才会生效。缺少 Token 且启用 Apollo 时启动直接失败。
 
 在 Apollo Portal 的开放平台为 Token 授予对应 App 的创建 Cluster 权限，以及 `web.<app>` Namespace 在 FAT 的修改和发布权限；别名对应的两个 App 都需要授权。`APOLLO_OPERATOR` 必须是 Apollo 已存在的用户，不会自动创建。Token 通过原始 `Authorization` Header 发送，不加 `Bearer` 前缀。401/403 不自动重试；只对读取操作的限流、服务端错误和网络错误做有限重试。不会记录 Token 或 API 响应配置内容。
 
-限制依据 Apollo v2.4.0 官方 [ClusterController](https://github.com/apolloconfig/apollo/blob/v2.4.0/apollo-portal/src/main/java/com/ctrip/framework/apollo/openapi/v1/controller/ClusterController.java) 和 [NamespaceController](https://github.com/apolloconfig/apollo/blob/v2.4.0/apollo-portal/src/main/java/com/ctrip/framework/apollo/openapi/v1/controller/NamespaceController.java)。若必须保留自动删除 Cluster，需要另行设计受控清理接口，不能假设 OpenAPI 支持 DELETE。
+创建和发布仍走 Portal OpenAPI。删除走 Admin Service 的 `DELETE /apps/{appId}/clusters/{clusterName}?operator=...`：以 RFC 1123 GMT Date 和包含完整 query string 的 request-line 做 HMAC-SHA256 签名。单独使用 HMAC Header，不向 Admin Service 发送 Portal Token；禁止跳转，不记录密钥或响应内容。
+
+在现有 Secret 中额外注入 `KONG_HMAC_USERNAME` 和 `KONG_HMAC_SECRET`。网关应仅授权所需的 App/Cluster 读取和 Cluster 删除路径，不应开放 App 删除接口。分页读取 `/apps` 直到空页后，精确查找并删除目标 Cluster，不依赖 Portal Token 的 App 可见范围；拒绝参考环境、排除列表、default 和不符合 `test[0-9]+` 的名称。404 视为已不存在，其他错误会中止并上报。未配置 HMAC 凭据不影响创建，但环境删除时 Apollo 清理会失败。
+
+删除不是跨 App 事务，失败时可能部分完成；当前 Namespace 删除处理器仅记录错误并继续更新删除状态，不会自动重试 Apollo 清理，需人工核查并重试。此改动不包含对已有 Cluster 缺失 Namespace 的自动补建。
 
 ## AWS 资源和身份认证
 
