@@ -136,24 +136,50 @@ class ApolloTests(unittest.IsolatedAsyncioTestCase):
         self.manager.hmac_secret = 'test-secret'
         path = '/apps/orders/clusters/test99?operator=a%2Bb+user'
         date = 'Fri, 09 Oct 2026 01:00:00 GMT'
-        message = f'date: {date}\nrequest-line: DELETE {path} HTTP/1.1'
+        message = f'date: {date}\nDELETE {path} HTTP/1.1'
         signature = base64.b64encode(hmac.new(b'test-secret', message.encode(), hashlib.sha256).digest()).decode()
         session = unittest.mock.MagicMock()
         response = AsyncMock()
         session.request.return_value.__aenter__.return_value = response
         response.status = 200
+        response.read.return_value = b''
         with patch('src.managers.apollo_manager.formatdate', return_value=date):
-            await self.manager._admin_request(session, 'DELETE', path)
+            await self.manager._admin_request(session, 'delete', path)
         kwargs = session.request.call_args.kwargs
         self.assertIn(f'signature="{signature}"', kwargs['headers']['Authorization'])
         self.assertEqual(session.request.call_args.args[1].raw_path_qs, path)
         self.assertFalse(kwargs['allow_redirects'])
+        self.assertEqual(session.request.call_args.args[0], 'DELETE')
         response.json.assert_not_awaited()
         response.status = 403
         with self.assertRaisesRegex(RuntimeError, 'HTTP 403'):
             await self.manager._admin_request(session, 'DELETE', path, missing_ok=True)
         response.status = 404
         self.assertIsNone(await self.manager._admin_request(session, 'DELETE', path, missing_ok=True))
+
+    async def test_admin_secret_newline_rejected_before_request(self):
+        self.manager.hmac_username = 'watcher'
+        session = unittest.mock.MagicMock()
+        for secret in ('test-secret\n', 'test\rsecret'):
+            self.manager.hmac_secret = secret
+            with self.assertRaisesRegex(ValueError, 'KONG_HMAC_SECRET contains a newline'):
+                await self.manager._admin_request(session, 'GET', '/apps')
+        session.request.assert_not_called()
+
+    async def test_admin_empty_and_json_responses(self):
+        self.manager.hmac_username = 'watcher'
+        self.manager.hmac_secret = 'test-secret'
+        session = unittest.mock.MagicMock()
+        response = AsyncMock()
+        session.request.return_value.__aenter__.return_value = response
+        response.status = 200
+        response.read.return_value = b''
+        self.assertIsNone(await self.manager._admin_request(session, 'GET', '/apps'))
+        response.read.return_value = b'[]'
+        response.json.return_value = []
+        self.assertEqual(await self.manager._admin_request(session, 'GET', '/apps'), [])
+        response.status = 204
+        self.assertIsNone(await self.manager._admin_request(session, 'DELETE', '/apps/a/clusters/test9'))
 
     async def test_missing_target_namespace_attached_before_copy_and_release(self):
         original = self.api.side_effect
