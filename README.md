@@ -112,7 +112,7 @@ Apollo 配置复制遵循以下策略：
 3. 通过 OpenAPI 创建 Cluster，由 Apollo 自动实例化 App Namespace；可能出现空 secret Namespace，但 watcher 不读取或复制其中的配置。
 4. 只读取并复制 web.<app> Namespace 下的配置 Item，已有 key 不覆盖。保留原有环境名替换规则，SQS URL 和 SNS ARN 不替换。
 5. 没有 Release 时通过发布接口创建首次 Release，包含目标 Namespace 当前配置；已有 Release 不自动重发，避免发布人工草稿。补齐已有 Release 的缺失 Item 后，需要在 Portal 审核发布。
-6. 已有 Cluster 缺少 web.<app> Namespace 时明确报错，需要在 Portal 修复；2.4.0 OpenAPI 不支持向已有 Cluster 单独挂载 Namespace。缺失 Item 或首次 Release 可在后续同步时补齐。
+6. 新建或已有 Cluster 缺少 web.<app> Namespace 时，通过 HMAC 认证的 Admin Service 关联已有 Namespace，再通过 OpenAPI 写入参考 Cluster 的覆盖项并首次发布。不新建全局 AppNamespace，不复制公共 Namespace 的默认配置。缺失 Item 或首次 Release 可在后续同步时补齐。
 
 只为实际 Deployment 创建 Apollo Cluster。OpenAPI 操作不是数据库事务，失败后可能留下部分状态；重试会跳过已有 Cluster 和 Item。不要将一次同步日志视为全部系统均成功。
 
@@ -128,18 +128,22 @@ Apollo 配置复制遵循以下策略：
 | APOLLO_OPERATOR | Apollo 中已存在的操作用户 | namespace-watcher |
 | APOLLO_TIMEOUT_SECONDS | 单次 HTTP 请求超时秒数 | 30 |
 | APOLLO_ADMIN_URL | 删除操作使用的 Admin Service 地址，必须与 APOLLO_ENV 属于同一环境 | https://apollo-admin-fat.shub.us |
-| KONG_HMAC_USERNAME | Admin Service 网关 HMAC 用户名，通过 Secret 注入 | 删除时必填 |
-| KONG_HMAC_SECRET | Admin Service 网关 HMAC 密钥，通过 Secret 注入 | 删除时必填 |
+| KONG_HMAC_USERNAME | Admin Service 网关 HMAC 用户名，通过 Secret 注入 | 关联 Namespace / 删除时必填 |
+| KONG_HMAC_SECRET | Admin Service 网关 HMAC 密钥，通过 Secret 注入 | 关联 Namespace / 删除时必填 |
 
 在现有 `namespace-watcher-secrets` Secret 中添加 `APOLLO_API_TOKEN`；Deployment 已通过 `envFrom.secretRef` 注入，不要把真实 Token 提交到仓库。更新 Secret 后重启 watcher Pod，环境变量才会生效。缺少 Token 且启用 Apollo 时启动直接失败。
+
+Token 必须为单行文本。使用 YAML 多行标量时选择 `|-` 而不是 `|`，通过命令生成时使用 `printf '%s'` 而不是会追加换行的 `echo`。客户端会清除 Token 首尾空白；中间的换行和控制字符会导致启动校验失败，不会输出 Token 内容。出现 `Newline or carriage return detected in headers` 时应检查 Secret 注入的 Token 格式。
 
 在 Apollo Portal 的开放平台为 Token 授予对应 App 的创建 Cluster 权限，以及 `web.<app>` Namespace 在 FAT 的修改和发布权限；别名对应的两个 App 都需要授权。`APOLLO_OPERATOR` 必须是 Apollo 已存在的用户，不会自动创建。Token 通过原始 `Authorization` Header 发送，不加 `Bearer` 前缀。401/403 不自动重试；只对读取操作的限流、服务端错误和网络错误做有限重试。不会记录 Token 或 API 响应配置内容。
 
 创建和发布仍走 Portal OpenAPI。删除走 Admin Service 的 `DELETE /apps/{appId}/clusters/{clusterName}?operator=...`：以 RFC 1123 GMT Date 和包含完整 query string 的 request-line 做 HMAC-SHA256 签名。单独使用 HMAC Header，不向 Admin Service 发送 Portal Token；禁止跳转，不记录密钥或响应内容。
 
-在现有 Secret 中额外注入 `KONG_HMAC_USERNAME` 和 `KONG_HMAC_SECRET`。网关应仅授权所需的 App/Cluster 读取和 Cluster 删除路径，不应开放 App 删除接口。分页读取 `/apps` 直到空页后，精确查找并删除目标 Cluster，不依赖 Portal Token 的 App 可见范围；拒绝参考环境、排除列表、default 和不符合 `test[0-9]+` 的名称。404 视为已不存在，其他错误会中止并上报。未配置 HMAC 凭据不影响创建，但环境删除时 Apollo 清理会失败。
+在现有 Secret 中额外注入 `KONG_HMAC_USERNAME` 和 `KONG_HMAC_SECRET`。网关应仅授权所需的 App/Cluster 读取和 Cluster 删除路径，不应开放 App 删除接口。分页读取 `/apps` 直到空页后，精确查找并删除目标 Cluster，不依赖 Portal Token 的 App 可见范围；拒绝参考环境、排除列表、default 和不符合 `test[0-9]+` 的名称。404 视为已不存在，其他错误会中止并上报。未配置 HMAC 凭据时，缺失 Namespace 的关联补建和环境删除都会失败；目标 Namespace 已存在时仍可通过 OpenAPI 同步。
 
-删除不是跨 App 事务，失败时可能部分完成；当前 Namespace 删除处理器仅记录错误并继续更新删除状态，不会自动重试 Apollo 清理，需人工核查并重试。此改动不包含对已有 Cluster 缺失 Namespace 的自动补建。
+关联接口为 `POST /apps/{appId}/clusters/{cluster}/namespaces`，只提交 `web.{appId}` 的关联信息；需要网关额外授权此 POST 路径和 Namespace GET 路径。HMAC 凭据缺失或认证失败时会终止本次同步，不写入配置或发布。已有目标 key 保留；已有 Release 不自动重发，仍需审核发布新补齐的 Item。
+
+删除不是跨 App 事务，失败时可能部分完成；当前 Namespace 删除处理器仅记录错误并继续更新删除状态，不会自动重试 Apollo 清理，需人工核查并重试。
 
 ## AWS 资源和身份认证
 

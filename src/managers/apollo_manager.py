@@ -30,7 +30,7 @@ class ApolloManager:
 
     def __init__(self):
         self.base_url = apollo_config.url.rstrip("/")
-        self.token = apollo_config.token
+        self.token = (apollo_config.token or "").strip()
         self.apollo_env = apollo_config.env
         self.operator = apollo_config.operator
         self.timeout = apollo_config.timeout_seconds
@@ -39,6 +39,8 @@ class ApolloManager:
         self.hmac_secret = apollo_config.hmac_secret
         if not self.token:
             raise ValueError("APOLLO_API_TOKEN is required when ENABLE_APOLLO_CONFIG=true")
+        if any(ord(char) < 32 or ord(char) == 127 for char in self.token):
+            raise ValueError("APOLLO_API_TOKEN contains an embedded control character; check the injected Secret")
         if not self.operator:
             raise ValueError("APOLLO_OPERATOR must be an existing Apollo user")
         self.reference_env = app_config.reference_env
@@ -90,12 +92,7 @@ class ApolloManager:
         if (not re.fullmatch(r"test[0-9]+", env) or env == self.reference_env
                 or env in app_config.excluded_namespaces):
             raise ValueError(f"Refusing to delete protected or invalid Apollo cluster {env}")
-        if not self.hmac_username or not self.hmac_secret:
-            raise ValueError("KONG_HMAC_USERNAME and KONG_HMAC_SECRET are required for Apollo cleanup")
-        base = URL(self.admin_url)
-        if (base.scheme != "https" or not base.host or base.user is not None
-                or base.path != "/" or base.query_string or base.fragment):
-            raise ValueError("APOLLO_ADMIN_URL must be an HTTPS origin without a path or credentials")
+        self._validate_admin_config()
         async with self._lock, aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.timeout)
         ) as session:
@@ -144,22 +141,60 @@ class ApolloManager:
             f'headers="date request-line", signature="{signature}"'
         )}
 
-    async def _admin_request(self, session, method, path, *, missing_ok=False):
+    def _validate_admin_config(self):
+        if not self.hmac_username or not self.hmac_secret:
+            raise ValueError("KONG_HMAC_USERNAME and KONG_HMAC_SECRET are required for Apollo Admin operations")
+        base = URL(self.admin_url)
+        if (base.scheme != "https" or not base.host or base.user is not None
+                or base.path != "/" or base.query_string or base.fragment):
+            raise ValueError("APOLLO_ADMIN_URL must be an HTTPS origin without a path or credentials")
+
+    async def _admin_request(self, session, method, path, *, missing_ok=False, **kwargs):
+        self._validate_admin_config()
         # Preserve the exact escaped request target used in the HMAC signature.
         url = URL(self.admin_url + path, encoded=True)
         try:
             async with session.request(method, url, headers=self._admin_headers(method, path),
-                                       allow_redirects=False) as response:
+                                       allow_redirects=False, **kwargs) as response:
                 if response.status == 404 and missing_ok:
                     return None
                 if not 200 <= response.status < 300:
-                    raise RuntimeError(f"Apollo Admin {method} failed: HTTP {response.status}")
+                    raise ApolloAPIError(method, path, response.status)
                 # Admin DELETE returns an empty 200 response, not necessarily 204.
                 if method == "DELETE":
                     return None
                 return await response.json()
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             raise RuntimeError(f"Apollo Admin {method} transport or response failure") from None
+
+    async def _ensure_web_namespace(self, app_id, env):
+        """Attach the existing web namespace, without creating a global AppNamespace."""
+        self._validate_admin_config()
+        name = f"web.{app_id}"
+        path = f"/apps/{quote(app_id, safe='')}/clusters/{quote(env, safe='')}/namespaces"
+        detail = path + "/" + quote(name, safe="")
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+            existing = await self._admin_request(session, "GET", detail, missing_ok=True)
+            if existing is None:
+                try:
+                    await self._admin_request(session, "POST", path, json={
+                        "appId": app_id, "clusterName": env, "namespaceName": name,
+                        "dataChangeCreatedBy": self.operator,
+                        "dataChangeLastModifiedBy": self.operator,
+                    })
+                except ApolloAPIError as error:
+                    # Another watcher may have attached it between GET and POST.
+                    if error.status not in (400, 409):
+                        raise
+                    existing = await self._admin_request(session, "GET", detail, missing_ok=True)
+                    if existing is None:
+                        raise
+                else:
+                    existing = await self._admin_request(session, "GET", detail)
+            if (not isinstance(existing, dict) or existing.get("appId") != app_id
+                    or existing.get("clusterName") != env or existing.get("namespaceName") != name):
+                raise RuntimeError("Apollo Admin returned a mismatched namespace")
+        logger.info("Apollo namespace ensured app=%s cluster=%s namespace=%s", app_id, env, name)
 
     async def get_cluster_apps(self, env: str) -> List[Dict[str, str]]:
         results = []
@@ -237,10 +272,8 @@ class ApolloManager:
                         raise
             destination = await self._request(session, "GET", target + suffix, missing_ok=True)
             if destination is None:
-                raise RuntimeError(
-                    f"Apollo namespace web.{app_id} missing in cluster {env}; "
-                    "2.4.0 OpenAPI cannot attach a namespace to an existing cluster; repair in Portal"
-                )
+                await self._ensure_web_namespace(app_id, env)
+                destination = await self._request(session, "GET", target + suffix)
             if not isinstance(destination.get("items"), list):
                 raise RuntimeError("Apollo target namespace response is missing items")
             existing = {item["key"] for item in destination.get("items", []) if item.get("key")}

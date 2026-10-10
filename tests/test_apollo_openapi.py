@@ -155,7 +155,44 @@ class ApolloTests(unittest.IsolatedAsyncioTestCase):
         response.status = 404
         self.assertIsNone(await self.manager._admin_request(session, 'DELETE', path, missing_ok=True))
 
-    async def test_missing_target_namespace_is_error(self):
+    async def test_missing_target_namespace_attached_before_copy_and_release(self):
+        original = self.api.side_effect
+        attached = False
+
+        async def attach(app, env):
+            nonlocal attached
+            self.assertEqual((app, env), ('orders', 'test99'))
+            attached = True
+
+        self.manager._ensure_web_namespace = AsyncMock(side_effect=attach)
+
+        async def missing(session, method, path, **kwargs):
+            if path == self.target + self.suffix and not attached:
+                return None
+            return await original(session, method, path, **kwargs)
+
+        self.api.side_effect = missing
+        await self.manager.ensure_subenv_app_config('orders', 'test99')
+        self.manager._ensure_web_namespace.assert_awaited_once_with('orders', 'test99')
+        self.assertEqual(len(self.items), 2)
+        self.assertIsNotNone(self.release)
+        await self.manager.ensure_subenv_app_config('orders', 'test99')
+        self.manager._ensure_web_namespace.assert_awaited_once()
+
+    async def test_namespace_admin_payload_and_duplicate_race(self):
+        self.manager.hmac_username = 'watcher'
+        self.manager.hmac_secret = 'test-secret'
+        dto = {'appId': 'orders', 'clusterName': 'test99', 'namespaceName': 'web.orders'}
+        for post_result in (dto, ApolloAPIError('POST', '/namespaces', 400)):
+            admin = AsyncMock(side_effect=[None, post_result, dto])
+            self.manager._admin_request = admin
+            await self.manager._ensure_web_namespace('orders', 'test99')
+            call = admin.call_args_list[1]
+            self.assertEqual(call.args[1:3], ('POST', '/apps/orders/clusters/test99/namespaces'))
+            self.assertEqual(call.kwargs['json'], dict(dto,
+                dataChangeCreatedBy='namespace-watcher', dataChangeLastModifiedBy='namespace-watcher'))
+
+    async def test_namespace_admin_auth_failure_stops_sync(self):
         original = self.api.side_effect
 
         async def missing(session, method, path, **kwargs):
@@ -164,8 +201,13 @@ class ApolloTests(unittest.IsolatedAsyncioTestCase):
             return await original(session, method, path, **kwargs)
 
         self.api.side_effect = missing
-        with self.assertRaisesRegex(RuntimeError, 'repair in Portal'):
+        self.manager.hmac_username = 'watcher'
+        self.manager.hmac_secret = 'test-secret'
+        admin = AsyncMock(side_effect=ApolloAPIError('GET', '/namespaces', 403))
+        self.manager._admin_request = admin
+        with self.assertRaises(ApolloAPIError):
             await self.manager.ensure_subenv_app_config('orders', 'test99')
+        self.assertFalse(self.items)
         self.assertIsNone(self.release)
 
     def test_required_token(self):
@@ -177,6 +219,25 @@ class ApolloTests(unittest.IsolatedAsyncioTestCase):
         async with self.manager._session() as session:
             self.assertEqual(session.headers['Authorization'], 'test-token')
             self.assertEqual(session.timeout.total, 30)
+
+    async def test_token_surrounding_whitespace_removed(self):
+        with patch.object(apollo_config, 'token', ' \r\ntest-token\n\t'):
+            manager = ApolloManager()
+        async with manager._session() as session:
+            self.assertEqual(session.headers['Authorization'], 'test-token')
+
+    def test_embedded_token_controls_rejected_without_secret(self):
+        for control in ('\r', '\n', '\t', '\x00', '\x7f'):
+            with self.subTest(control=repr(control)):
+                with patch.object(apollo_config, 'token', f'private{control}token'):
+                    with self.assertRaisesRegex(ValueError, 'embedded control character') as caught:
+                        ApolloManager()
+                self.assertNotIn('private', str(caught.exception))
+
+    def test_whitespace_only_token_rejected(self):
+        with patch.object(apollo_config, 'token', ' \r\n\t'):
+            with self.assertRaisesRegex(ValueError, 'APOLLO_API_TOKEN is required'):
+                ApolloManager()
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
