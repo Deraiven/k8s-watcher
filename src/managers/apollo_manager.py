@@ -132,7 +132,8 @@ class ApolloManager:
         if any(char in self.hmac_username for char in ('"', '\\', '\r', '\n')):
             raise ValueError("Invalid KONG_HMAC_USERNAME")
         date = formatdate(usegmt=True)
-        signing_string = f"date: {date}\nrequest-line: {method} {path} HTTP/1.1"
+        # Kong's request-line pseudo-header contributes only its value.
+        signing_string = f"date: {date}\n{method.upper()} {path} HTTP/1.1"
         signature = base64.b64encode(hmac.new(
             self.hmac_secret.encode(), signing_string.encode(), hashlib.sha256
         ).digest()).decode()
@@ -144,6 +145,8 @@ class ApolloManager:
     def _validate_admin_config(self):
         if not self.hmac_username or not self.hmac_secret:
             raise ValueError("KONG_HMAC_USERNAME and KONG_HMAC_SECRET are required for Apollo Admin operations")
+        if "\n" in self.hmac_secret or "\r" in self.hmac_secret:
+            raise ValueError("KONG_HMAC_SECRET contains a newline")
         base = URL(self.admin_url)
         if (base.scheme != "https" or not base.host or base.user is not None
                 or base.path != "/" or base.query_string or base.fragment):
@@ -151,6 +154,7 @@ class ApolloManager:
 
     async def _admin_request(self, session, method, path, *, missing_ok=False, **kwargs):
         self._validate_admin_config()
+        method = method.upper()
         # Preserve the exact escaped request target used in the HMAC signature.
         url = URL(self.admin_url + path, encoded=True)
         try:
@@ -160,8 +164,7 @@ class ApolloManager:
                     return None
                 if not 200 <= response.status < 300:
                     raise ApolloAPIError(method, path, response.status)
-                # Admin DELETE returns an empty 200 response, not necessarily 204.
-                if method == "DELETE":
+                if response.status == 204 or not await response.read():
                     return None
                 return await response.json()
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
