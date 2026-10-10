@@ -57,7 +57,7 @@ class ApolloManager:
         env, app, name = (quote(value, safe="") for value in segments)
         return f"/openapi/v1/envs/{env}/apps/{app}/clusters/{name}"
 
-    async def _request(self, session, method, path, *, missing_ok=False, **kwargs):
+    async def _request(self, session, method, path, *, missing_ok=False, empty_ok=False, **kwargs):
         # Only GETs are automatically retried: a timed-out write may have succeeded.
         for attempt in range(3):
             try:
@@ -72,9 +72,18 @@ class ApolloManager:
                             continue
                     if not 200 <= response.status < 300:
                         raise ApolloAPIError(method, path, response.status)
-                    if response.status == 204:
-                        return None
-                    return await response.json()
+                    body = await response.read()
+                    if response.status == 204 or not body:
+                        if empty_ok:
+                            return None
+                        raise RuntimeError(f"Apollo OpenAPI {method} {path} returned an unexpected empty response")
+                    try:
+                        return await response.json()
+                    except (aiohttp.ContentTypeError, ValueError):
+                        raise RuntimeError(
+                            f"Apollo OpenAPI {method} {path} returned an invalid JSON response "
+                            f"(HTTP {response.status})"
+                        ) from None
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 if method == "GET" and attempt < 2:
                     await asyncio.sleep(2 ** attempt)
@@ -292,7 +301,7 @@ class ApolloManager:
                 })
                 items_created += 1
             latest = await self._request(session, "GET", target + suffix + "/releases/latest",
-                                         missing_ok=True)
+                                         missing_ok=True, empty_ok=True)
             released = 0
             if latest is None:
                 await self._request(session, "POST", target + suffix + "/releases", json={

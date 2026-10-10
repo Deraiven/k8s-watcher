@@ -267,6 +267,35 @@ class ApolloTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_latest_release_empty_200_is_not_transport_failure(self):
+        with patch.object(apollo_config, 'token', 'test-token'):
+            manager = ApolloManager()
+        session = unittest.mock.MagicMock()
+        response = AsyncMock()
+        session.request.return_value.__aenter__.return_value = response
+        response.status = 200
+        response.read.return_value = b''
+        self.assertIsNone(await manager._request(
+            session, 'GET', '/releases/latest', missing_ok=True, empty_ok=True))
+        self.assertEqual(session.request.call_count, 1)
+        response.json.assert_not_awaited()
+        with self.assertRaisesRegex(RuntimeError, 'unexpected empty response'):
+            await manager._request(session, 'GET', '/namespaces/web.orders', missing_ok=True)
+
+    async def test_invalid_json_is_not_retried_or_logged(self):
+        with patch.object(apollo_config, 'token', 'test-token'):
+            manager = ApolloManager()
+        session = unittest.mock.MagicMock()
+        response = AsyncMock()
+        session.request.return_value.__aenter__.return_value = response
+        response.status = 200
+        response.read.return_value = b'private-invalid-body'
+        response.json.side_effect = ValueError('private-invalid-body')
+        with self.assertRaisesRegex(RuntimeError, 'invalid JSON response') as caught:
+            await manager._request(session, 'GET', '/releases/latest', empty_ok=True)
+        self.assertNotIn('private-invalid-body', str(caught.exception))
+        self.assertEqual(session.request.call_count, 1)
+
     async def test_status_and_redaction(self):
         with patch.object(apollo_config, 'token', 'test-token'):
             manager = ApolloManager()
