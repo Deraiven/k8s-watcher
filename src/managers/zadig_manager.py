@@ -65,7 +65,7 @@ class ZadigManager:
         """执行具体的清理逻辑"""
         logger.info("开始执行环境清理巡检...")
         
-        whiteList = ["test17", "test33", "test5", "test54"]
+        exemptions = app_config.cleanup_exempt_namespaces
         envList = await self.get_environments()
         if not envList:
             logger.warning("环境清理巡检结束：未获取到环境列表")
@@ -96,7 +96,7 @@ class ZadigManager:
             if not self._is_managed_test_namespace(namespace_name):
                 logger.debug(f"跳过非托管测试环境: {env_name} (namespace={namespace_name})")
                 continue
-            if env_name in whiteList:
+            if env_name in exemptions or namespace_name in exemptions:
                 logger.debug(f"跳过白名单环境: {env_name}")
                 continue
             if is_production:
@@ -165,6 +165,10 @@ class ZadigManager:
             labels = namespace.metadata.labels or {}
 
             if not self._is_managed_test_namespace(namespace_name):
+                continue
+            if namespace_name in app_config.cleanup_exempt_namespaces:
+                skipped_count += 1
+                logger.info("跳过清理豁免 namespace: %s", namespace_name)
                 continue
             if labels.get(app_config.namespace_label_key) != app_config.namespace_label_value:
                 skipped_count += 1

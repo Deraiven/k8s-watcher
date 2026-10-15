@@ -78,6 +78,13 @@ class AppConfig:
         os.getenv("EXCLUDED_NAMESPACES", "test17,test33").split(",")
     ))
     
+    # Cleanup exemptions do not disable namespace/deployment reconciliation.
+    cleanup_exempt_namespaces: Set[str] = field(default_factory=lambda: {
+        name.strip() for name in os.getenv(
+            "CLEANUP_EXEMPT_NAMESPACES", "test17,test33,test5,test54,test28"
+        ).split(",") if name.strip()
+    })
+
     # Feature flags
     enable_cert_management: bool = os.getenv("ENABLE_CERT_MANAGEMENT", "true").lower() == "true"
     enable_dns_management: bool = os.getenv("ENABLE_DNS_MANAGEMENT", "true").lower() == "true"
