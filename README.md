@@ -168,10 +168,10 @@ Zadig Manager 注册了每天北京时间凌晨 3 点执行的清理任务。调
 清理规则：
 
 - 只处理名称符合 test\d+ 的环境
-- 跳过白名单环境：test17、test33、test5、test50
+- 跳过白名单环境：test17、test33、test5、test54
 - 跳过生产环境
 - Namespace 创建超过 7 天，且 Zadig 环境列表的 `update_time` 距当前超过 1 天：才调用 Zadig sleep API 进入睡眠状态。两个条件必须同时满足；恰好 7 天或 1 天不触发。`update_time` 缺失或无效时跳过睡眠，支持秒/毫秒时间戳。
-- 已睡眠超过 7 天：调用 Zadig API 删除环境
+- 状态为 sleeping，且 Zadig `update_time` 距当前超过 3 天：调用 Zadig API 删除环境。沿用更新时间作为睡眠时长的判断依据，并非独立记录的睡眠开始时间；恰好 3 天不删除，更新时间缺失或无效时不删除。
 
 同时还有孤儿 Namespace 清理任务：
 
