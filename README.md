@@ -170,7 +170,7 @@ Zadig Manager 注册了每天北京时间凌晨 3 点执行的清理任务。调
 清理规则：
 
 - 只处理名称符合 test\d+ 的环境
-- 跳过白名单环境：test17、test33、test5、test54
+- 跳过 `CLEANUP_EXEMPT_NAMESPACES` 中的环境（匹配 Zadig env_key 或 Kubernetes Namespace 名），默认 test17、test33、test5、test54、test28
 - 跳过生产环境
 - Namespace 创建超过 7 天，且 Zadig 环境列表的 `update_time` 距当前超过 1 天：才调用 Zadig sleep API 进入睡眠状态。两个条件必须同时满足；恰好 7 天或 1 天不触发。`update_time` 缺失或无效时跳过睡眠，支持秒/毫秒时间戳。
 - 状态为 sleeping，且 Zadig `update_time` 距当前超过 3 天：调用 Zadig API 删除环境。沿用更新时间作为睡眠时长的判断依据，并非独立记录的睡眠开始时间；恰好 3 天不删除，更新时间缺失或无效时不删除。
@@ -181,7 +181,10 @@ Zadig Manager 注册了每天北京时间凌晨 3 点执行的清理任务。调
 - 扫描集群 Namespace
 - 只检查 test 加数字的 Namespace
 - 只处理 createdBy=koderover 的 Namespace
+- 跳过 `CLEANUP_EXEMPT_NAMESPACES` 中的 Namespace
 - 集群中存在、但 Zadig 项目中不存在的 Namespace 会被删除
+
+`CLEANUP_EXEMPT_NAMESPACES` 是完整替换列表，不会自动合并默认值；支持逗号分隔、去除首尾空格和去重，显式空字符串表示没有清理豁免。修改 ConfigMap 后需重建 watcher Pod 才会加载新值。该配置不阻止人工删除，也不阻止处理已发生的 Namespace 删除事件。不要为清理豁免而改动 `EXCLUDED_NAMESPACES`，后者会跳过监控和资源同步。
 
 ## 状态恢复和 Reconcile
 
@@ -232,6 +235,7 @@ src/utils/schedule.py         定时任务
 | NAMESPACE_LABEL_KEY | Namespace 管理标签名 | createdBy |
 | NAMESPACE_LABEL_VALUE | Namespace 管理标签值 | koderover |
 | EXCLUDED_NAMESPACES | 不处理的 Namespace，逗号分隔 | test17,test33 |
+| CLEANUP_EXEMPT_NAMESPACES | 免于自动睡眠、过期删除和孤儿 Namespace 清理；不影响监控和资源同步，逗号分隔 | test17,test33,test5,test54,test28 |
 | AWS_REGION | AWS 区域 | ap-southeast-1 |
 | ENABLE_AWS_RESOURCES | 是否管理 SQS/SNS | true |
 | ENABLE_APOLLO_CONFIG | 是否同步 Apollo | true |

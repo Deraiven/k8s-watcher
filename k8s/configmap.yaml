@@ -16,6 +16,7 @@ data:
   ENABLE_SUBENV_MONITOR: "true"
   ENABLE_ZADIG_WORKFLOW: "true"
   EXCLUDED_NAMESPACES: test17,test33
+  CLEANUP_EXEMPT_NAMESPACES: test17,test33,test5,test54,test28
   IN_CLUSTER: "true"
   KONG_ADMIN_URL: http://kong-kong-admin.proxy:8001
   LOG_LEVEL: INFO

@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
+from src.config.settings import AppConfig, app_config
 
 # Importing the real scheduler starts a background thread. Keep tests offline.
 with patch.dict('sys.modules', {'src.utils.schedule': SimpleNamespace(
@@ -14,6 +15,46 @@ NOW = 1800000000
 
 
 class CleanupTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        guard = patch.object(app_config, 'cleanup_exempt_namespaces',
+                             {'test17', 'test33', 'test5', 'test54', 'test28'})
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def test_cleanup_env_parsing(self):
+        with patch.dict('os.environ', {'CLEANUP_EXEMPT_NAMESPACES': ' test28, test54,,test28 '}):
+            self.assertEqual(AppConfig().cleanup_exempt_namespaces, {'test28', 'test54'})
+        with patch.dict('os.environ', {'CLEANUP_EXEMPT_NAMESPACES': ''}):
+            self.assertEqual(AppConfig().cleanup_exempt_namespaces, set())
+
+    async def test_test28_and_namespace_alias_are_exempt(self):
+        for status in ('running', 'sleeping'):
+            for key in ('test28', 'zadig-alias'):
+                manager = await self.run_cleanup(30 * DAY, NOW - 8 * DAY,
+                    env_key=key, namespace='test28', status=status)
+                manager._set_environment_sleep.assert_not_awaited()
+                manager._clear_environment.assert_not_awaited()
+
+    async def test_custom_exemption_replaces_defaults(self):
+        with patch.object(app_config, 'cleanup_exempt_namespaces', {'test99'}):
+            manager = await self.run_cleanup(30 * DAY, NOW - 8 * DAY)
+            manager._set_environment_sleep.assert_not_awaited()
+            ordinary = await self.run_cleanup(30 * DAY, NOW - 8 * DAY,
+                env_key='test28', namespace='test28')
+            ordinary._set_environment_sleep.assert_awaited_once_with('test28', 'enable')
+
+    async def test_orphan_cleanup_honors_exemptions(self):
+        manager = object.__new__(ZadigManager)
+        manager.project_key = 'fat'
+        manager.get_environments = AsyncMock(return_value=[])
+        manager._delete_k8s_namespace = AsyncMock(return_value=True)
+        namespaces = [SimpleNamespace(metadata=SimpleNamespace(
+            name=name, labels={app_config.namespace_label_key: app_config.namespace_label_value}
+        )) for name in ('test28', 'test54', 'test99')]
+        manager.v1 = SimpleNamespace(list_namespace=Mock(return_value=SimpleNamespace(items=namespaces)))
+        await manager.cleanup_orphaned_k8s_namespaces()
+        manager._delete_k8s_namespace.assert_awaited_once_with('test99')
+
     async def run_cleanup(self, age, updated, **fields):
         # Avoid creating Kubernetes clients or making any network calls.
         manager = object.__new__(ZadigManager)
