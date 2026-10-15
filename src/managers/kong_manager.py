@@ -43,7 +43,8 @@ class KongManager:
                     skip_services = [
                         f"backoffice-v1-web-app-{self.reference_env}",
                         f"bo-v1-assets-{self.reference_env}",
-                        f"backoffice-v1-web-api-{self.reference_env}"
+                        f"backoffice-v1-web-api-{self.reference_env}",
+                        f"backoffice-v1-web-posapi-{self.reference_env}",
                     ]
                     if service_name in skip_services:
                         continue
@@ -179,7 +180,7 @@ class KongManager:
     @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
     async def ensure_subenv_deployment_routes(self, deployment_name: str, env: str) -> bool:
         """Create deployment-specific routes for monitored sub-environments."""
-        if deployment_name not in ("backoffice-v1-web-app", "backoffice-v1-web-api"):
+        if deployment_name not in ("backoffice-v1-web-app", "backoffice-v1-web-api", "backoffice-v1-web-posapi"):
             return True
 
         async with aiohttp.ClientSession() as session:
@@ -235,7 +236,8 @@ class KongManager:
                 )
                 return True
 
-            # backoffice-v1-web-api
+            # API workloads share the web-app pre-function plugin.
+            is_posapi = deployment_name == "backoffice-v1-web-posapi"
             service_name = f"{deployment_name}-{env}"
             await self._ensure_service(
                 session,
@@ -250,8 +252,8 @@ class KongManager:
                 session,
                 service_name=service_name,
                 route_payload={
-                    "hosts": [f"backoffice-api.{env}.shub.us"],
-                    "preserve_host": False,
+                    "hosts": [f"www.backoffice.{env}.shub.us" if is_posapi else f"backoffice-api.{env}.shub.us"],
+                    "preserve_host": is_posapi,
                     "protocols": ["http", "https"],
                     "https_redirect_status_code": 301,
                     "path_handling": "v1",
@@ -264,13 +266,15 @@ class KongManager:
     @async_retry(max_tries=3, exceptions=(aiohttp.ClientError,))
     async def remove_subenv_deployment_routes(self, deployment_name: str, env: str) -> bool:
         """Delete deployment-specific routes for monitored sub-environments."""
-        if deployment_name not in ("backoffice-v1-web-app", "backoffice-v1-web-api"):
+        if deployment_name not in ("backoffice-v1-web-app", "backoffice-v1-web-api", "backoffice-v1-web-posapi"):
             return True
 
         async with aiohttp.ClientSession() as session:
-            if deployment_name == "backoffice-v1-web-api":
+            if deployment_name in ("backoffice-v1-web-api", "backoffice-v1-web-posapi"):
                 service_name = f"{deployment_name}-{env}"
                 await self._delete_service_routes_by_env(session, service_name, env)
+                if deployment_name == "backoffice-v1-web-posapi":
+                    await self._delete_service_plugins(session, service_name)
                 await self._delete_service_if_exists(session, service_name)
                 logger.info("Removed sub-environment API routes: namespace=%s service=%s", env, service_name)
                 return True
@@ -280,6 +284,18 @@ class KongManager:
             await self._delete_service_routes_by_env(session, f"bo-v1-assets-{env}", env)
             await self._delete_service_if_exists(session, f"bo-v1-assets-{env}")
             return True
+
+    async def _delete_service_plugins(self, session, service_name):
+        async with session.get(f"{self.admin_url}/services/{service_name}/plugins") as response:
+            if response.status == 404:
+                return
+            if response.status != 200:
+                raise RuntimeError(f"Failed to list plugins for {service_name}: HTTP {response.status}")
+            plugins = (await response.json()).get("data", [])
+        for plugin in plugins:
+            async with session.delete(f"{self.admin_url}/plugins/{plugin['id']}") as response:
+                if response.status not in (204, 404):
+                    raise RuntimeError(f"Failed to delete plugin for {service_name}: HTTP {response.status}")
 
     async def _ensure_service(
         self,

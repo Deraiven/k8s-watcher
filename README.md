@@ -82,6 +82,8 @@ Deployment 创建时会执行：
 
 bo-v1-assets 和 inventory-cronjob 当前被配置为跳过 Apollo 同步。
 
+Deployment `backoffice-v1-web-posapi` 出现时，创建 Kong Service `backoffice-v1-web-posapi-{env}`，上游为 `http://backoffice-v1-web-posapi.{env}:80`，路由域名为 `www.backoffice.{env}.shub.us`（例如 `www.backoffice.test54.shub.us`）。保留 Host，复用 web-app 的 pre-function 插件注入 `x-env` 和 `traceparent`。Deployment 删除时清理其路由、插件和 Service；Namespace 删除时由环境级清理处理。此精确域名与原有 `*.backoffice.{env}.shub.us` 通配路由重叠，部署后需验证实际请求的路由命中。
+
 Deployment 删除时会删除该服务对应的 Kong 路由，不立即删除 Apollo 配置。Namespace 删除时，通过 Kong HMAC 认证调用 Apollo Admin Service 删除对应 Cluster，不回退到数据库直写。
 
 ### 4. 子环境删除时的资源清理
