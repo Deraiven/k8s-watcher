@@ -72,6 +72,7 @@ class ZadigManager:
             return
         now = int(time.time())
         expiry_threshold = now - (7 * 24 * 60 * 60)
+        inactivity_threshold = now - (24 * 60 * 60)
         logger.info(
             "环境清理阈值: %s (7天前)",
             datetime.datetime.fromtimestamp(expiry_threshold).strftime('%Y-%m-%d %H:%M:%S')
@@ -114,9 +115,20 @@ class ZadigManager:
 
             namespace_created_at = await self._get_namespace_created_timestamp(namespace_name)
             if namespace_created_at and namespace_created_at < expiry_threshold:
+                if update_time <= 0:
+                    logger.warning("跳过环境睡眠: %s，Zadig update_time 缺失或无效", env_name)
+                    continue
+                if update_time >= inactivity_threshold:
+                    logger.info("跳过环境睡眠: %s，Zadig 更新时间未超过1天", env_name)
+                    continue
                 sleep_candidates += 1
                 created_date = datetime.datetime.fromtimestamp(namespace_created_at).strftime('%Y-%m-%d')
-                logger.info(f"检测到创建超过7天环境: {env_name} (namespace={namespace_name}, 创建时间: {created_date})")
+                updated_date = datetime.datetime.fromtimestamp(update_time).strftime('%Y-%m-%d %H:%M:%S')
+                logger.info(
+                    "检测到创建超过7天且Zadig更新时间超过1天环境: %s "
+                    "(namespace=%s, 创建时间: %s, Zadig更新时间: %s)",
+                    env_name, namespace_name, created_date, updated_date,
+                )
                 if await self._set_environment_sleep(env_name, "enable"):
                     slept_count += 1
         

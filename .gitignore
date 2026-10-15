@@ -64,3 +64,4 @@ htmlcov/
 dmypy.json
 tests/*
 !tests/test_apollo_openapi.py
+!tests/test_zadig_cleanup.py
