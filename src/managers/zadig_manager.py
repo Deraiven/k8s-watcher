@@ -65,7 +65,7 @@ class ZadigManager:
         """执行具体的清理逻辑"""
         logger.info("开始执行环境清理巡检...")
         
-        whiteList = ["test17", "test33", "test5", "test50"]
+        whiteList = ["test17", "test33", "test5", "test54"]
         envList = await self.get_environments()
         if not envList:
             logger.warning("环境清理巡检结束：未获取到环境列表")
@@ -73,9 +73,11 @@ class ZadigManager:
         now = int(time.time())
         expiry_threshold = now - (7 * 24 * 60 * 60)
         inactivity_threshold = now - (24 * 60 * 60)
+        deletion_threshold = now - (3 * 24 * 60 * 60)
         logger.info(
-            "环境清理阈值: %s (7天前)",
-            datetime.datetime.fromtimestamp(expiry_threshold).strftime('%Y-%m-%d %H:%M:%S')
+            "环境清理阈值: 创建时间早于 %s (7天前)，睡眠环境更新时间早于 %s (3天前)",
+            datetime.datetime.fromtimestamp(expiry_threshold).strftime('%Y-%m-%d %H:%M:%S'),
+            datetime.datetime.fromtimestamp(deletion_threshold).strftime('%Y-%m-%d %H:%M:%S'),
         )
         total_count = len(envList)
         sleep_candidates = 0
@@ -105,10 +107,10 @@ class ZadigManager:
             update_time = self._normalize_timestamp(raw_update_time)
 
             if status == "sleeping":
-                if update_time and update_time < expiry_threshold:
+                if 0 < update_time < deletion_threshold:
                     delete_candidates += 1
                     last_date = datetime.datetime.fromtimestamp(update_time).strftime('%Y-%m-%d')
-                    logger.info(f"检测到睡眠超过7天环境: {env_name} (睡眠/更新时间: {last_date})")
+                    logger.info(f"检测到睡眠超过3天环境: {env_name} (睡眠/更新时间: {last_date})")
                     if await self._clear_environment(env_name):
                         deleted_count += 1
                 continue

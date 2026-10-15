@@ -59,11 +59,37 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
             manager._set_environment_sleep.assert_not_awaited()
             manager._clear_environment.assert_not_awaited()
 
-    async def test_sleeping_deletion_threshold_unchanged(self):
-        for age, expected in ((7 * DAY + 1, True), (7 * DAY, False), (2 * DAY, False)):
+    async def test_sleeping_deletion_requires_more_than_three_days(self):
+        for age, expected in ((3 * DAY + 1, True), (3 * DAY, False), (2 * DAY, False), (4 * DAY, True)):
             manager = await self.run_cleanup(30 * DAY, NOW - age, status='sleeping')
             self.assertEqual(manager._clear_environment.await_count, int(expected))
             manager._set_environment_sleep.assert_not_awaited()
+
+    async def test_sleeping_invalid_timestamp_is_not_deleted(self):
+        for updated in (None, 0, '', 'invalid', -1, NOW + DAY):
+            manager = await self.run_cleanup(30 * DAY, updated, status='sleeping')
+            manager._clear_environment.assert_not_awaited()
+            manager._set_environment_sleep.assert_not_awaited()
+
+    async def test_sleeping_millisecond_timestamp(self):
+        manager = await self.run_cleanup(30 * DAY, (NOW - 3 * DAY - 1) * 1000, status='sleeping')
+        manager._clear_environment.assert_awaited_once_with('test99')
+        manager._set_environment_sleep.assert_not_awaited()
+
+    async def test_whitelist_moves_from_test50_to_test54(self):
+        for status in ('running', 'sleeping'):
+            protected = await self.run_cleanup(
+                30 * DAY, NOW - 8 * DAY, env_key='test54', namespace='test54', status=status)
+            protected._set_environment_sleep.assert_not_awaited()
+            protected._clear_environment.assert_not_awaited()
+            ordinary = await self.run_cleanup(
+                30 * DAY, NOW - 8 * DAY, env_key='test50', namespace='test50', status=status)
+            if status == 'running':
+                ordinary._set_environment_sleep.assert_awaited_once_with('test50', 'enable')
+                ordinary._clear_environment.assert_not_awaited()
+            else:
+                ordinary._clear_environment.assert_awaited_once_with('test50')
+                ordinary._set_environment_sleep.assert_not_awaited()
 
 
 if __name__ == '__main__':
